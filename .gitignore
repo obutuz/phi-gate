@@ -6,3 +6,8 @@ dist/
 .venv/
 .phi-gate/
 *.map.json
+.DS_Store
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.coverage

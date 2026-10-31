@@ -6,6 +6,7 @@ your commits, or the tools your agent talks to.
 
 [![CI](https://github.com/obutuz/phi-gate/actions/workflows/ci.yml/badge.svg)](https://github.com/obutuz/phi-gate/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+[![CodeQL](https://github.com/obutuz/phi-gate/actions/workflows/codeql.yml/badge.svg)](https://github.com/obutuz/phi-gate/actions/workflows/codeql.yml)
 ![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
@@ -30,8 +31,9 @@ and when it cannot run, it blocks instead of letting things through.
 | Tool output | `PostToolUse` on `Bash`, `Grep`, `WebFetch`, `mcp__*` | Output with PHI is flagged; the agent is told not to propagate it and to tell you |
 | Its own rules | `PreToolUse` | The agent cannot edit `.phi-gate.toml` or the audit log, so it cannot loosen its own guardrails |
 
-Every block is written to `.phi-gate/audit.jsonl` with the event, tool, target file and
-the categories found. Never values, never hashes of values.
+Every block, warning and override is written to a hash-chained log at
+`.phi-gate/audit.jsonl` with the event, tool, target file and the categories found. Never
+values, never hashes of values.
 
 ## How a Claude Code session goes
 
@@ -106,6 +108,7 @@ phi-gate scan --staged --json       # machine output for CI
 phi-gate redact export.csv          # placeholder copy on stdout
 phi-gate redact export.csv --map m.json && phi-gate restore --map m.json < answer.txt
 phi-gate status                     # config and recent audit events
+phi-gate audit verify               # exit 1 if the audit log was altered
 phi-gate explain                    # every detector and the decision rules
 ```
 
@@ -123,7 +126,7 @@ useful for analysis:
 
 ![a git commit blocked by the phi-gate pre-commit hook](docs/images/commit.png)
 
-**Audit**: every decision the hooks make is logged with event, tool, target and category:
+**Audit**: every block, warning and override is logged with event, tool, target and category:
 
 ![phi-gate status showing configuration and recent audit events](docs/images/status.png)
 
@@ -134,8 +137,10 @@ validation (check digits, issued ranges, labelled context), plus parsers for the
 formats healthcare data actually arrives in. Text files are read as UTF-8, UTF-16 or
 UTF-32. Containers are opened and their contents scanned: `.xlsx`, `.docx`, `.pptx`,
 OpenDocument files, zip and gzip archives, and SQLite databases (header plus the first
-500 rows of each table), because exports are how patient lists actually travel. A
-container that cannot be parsed is blocked, not skipped.
+500 rows of each table), because exports are how patient lists actually travel. The scanner,
+`phi-gate redact` and the commit gate all read them the same way. A container that cannot
+be parsed is blocked, not skipped, and so is a DICOM image, whose header holds the patient's
+name.
 
 | Blocks on its own (HIGH) | Blocks next to a clinical fact (MEDIUM) | Informational (LOW) |
 |---|---|---|
@@ -171,10 +176,11 @@ tell it from a real export. Keep generator output under a folder listed in `allo
 ### Measured false-positive rate
 
 Blocking ordinary code would get the plugin uninstalled in a day, so this is measured,
-not hoped for. Across 3,669 source files (40 MB: the CPython 3.13 standard library,
-npm, eslint, playwright and pnpm), phi-gate made **zero content-based blocks**. The one
-block was a 7.5 MB bundled `pnpm.cjs` over the size limit, which is the fail-closed
-rule doing its job. Average cost: 9 ms per file. Reproduce it on your own code:
+not hoped for. Across 10,992 source files (129 MB: the CPython 3.13 standard library,
+Django, NumPy, pandas and other site-packages, and npm), phi-gate blocked **2 files, or
+0.02%**: a line of `enum.py` that reads like a table header, and a 19-digit integer in
+NumPy test data that passes the payment card check. Average cost: about 11 ms per file.
+Reproduce it on your own code:
 
 ```bash
 python3 bench/false_positive_sweep.py path/to/your/repo
@@ -191,6 +197,7 @@ mode = "block"                       # block | warn | audit
 allow_paths = ["tests/fixtures/*"]   # synthetic data lives here
 allow_values = ["1EG4-TE5-MK73"]     # known test values (full-match regex)
 disable = []                         # categories to switch off
+opaque = "allow"                     # or "block": refuse formats phi-gate cannot read
 ```
 
 Start with `mode = "audit"` on an existing repo to see what would be blocked, then
@@ -200,6 +207,9 @@ switch to `block`.
 identifiers, and the override is logged. Only a person can type a prompt, so the agent
 cannot use it. Use it only where your organisation has a BAA covering the model provider,
 or switch it off with `prompt_override_token = ""`.
+
+**Managed policy.** A security team can install a policy that every repository on a machine
+must meet and none can loosen. See the [deployment guide](docs/DEPLOYMENT.md).
 
 ## Fail-closed by design
 
@@ -225,7 +235,8 @@ Be clear-eyed about what a pattern scanner on a developer machine can and cannot
 - **It is not a de-identification tool.** It catches structured identifiers and common
   healthcare formats. It misses names in free-text clinical notes without a label,
   identifiers in PDFs, images, legacy `.doc`/`.xls`, 7z/rar, Parquet and nested
-  archives (these are not inspected), and non-US identifiers.
+  archives (these are not inspected, or are refused with `opaque = "block"`), and non-US
+  identifiers.
 - **Shell analysis is best-effort.** Bash is a programming language. phi-gate closes the
   cheap routes (see the table above), but a path assembled at runtime, a query against a
   database server, or a directory tree of more than 300 files is only checked after the
@@ -246,14 +257,28 @@ Be clear-eyed about what a pattern scanner on a developer machine can and cannot
 - This is a Claude Code plugin. claude.ai and Cowork do not install plugins that ship a
   `bin/` folder.
 
+The [threat model](docs/THREAT-MODEL.md) sets out what phi-gate defends against and where
+that stops. The [deployment guide](docs/DEPLOYMENT.md) covers rolling it out across a team.
+
+## Roadmap
+
+- Optional named-entity recognition for names in free text, behind a flag, keeping the
+  standard-library default
+- Remaining Safe Harbor identifiers: license, vehicle and device numbers
+- Pluggable detector packs for non-US identifiers
+- Windows support, which today is blocked by the bash hook wrapper
+- Direct audit shipping to a SIEM
+- Publishing to PyPI, and an independent security review before 1.0
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests     # 97 tests, standard library only
-./demo/run-demo.sh
+python3 -m unittest discover -s tests     # unit, hook, git, property and stress tests
+./demo/run-demo.sh                        # exits 1 if any decision changes
 claude plugin validate . --strict
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checks.
 
 Layout:
 
@@ -264,13 +289,10 @@ bin/phi-gate        CLI, put on the agent's PATH by Claude Code
 src/phi_gate/       detectors, policy, scanner, shell analysis, redaction, audit, hooks, CLI
 skills/             hipaa-aware-dev skill and references
 commands/           /phi-gate:scan, /phi-gate:redact, /phi-gate:status
-tests/              unit, end-to-end hook and bypass-regression tests (synthetic data only)
+tests/              unit, hook, git, property and stress tests (synthetic data only)
 bench/              false-positive sweep
-docs/images/        README screenshots (synthetic data only)
+docs/               threat model, deployment guide, README screenshots (synthetic data only)
 ```
-
-Issues and pull requests are welcome, especially new healthcare formats and real-world
-false positives (please describe the pattern; never paste real data).
 
 ## License
 

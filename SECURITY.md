@@ -11,6 +11,13 @@ Describe the pattern and the tool call. **Never include real patient data**:
 reproduce with synthetic values (SSNs starting with 9 will not trigger the SSN
 detector, so use a format-valid fake such as 123-45-6789).
 
+Expect an acknowledgement within a few days. A confirmed bypass gets a regression
+test and a fix, and the report is credited in the changelog if you would like.
+
+## Supported versions
+
+Security fixes go to the latest release.
+
 ## Scope
 
 In scope: bypasses of the hooks, fail-open behaviour, values leaking into

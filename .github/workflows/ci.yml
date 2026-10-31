@@ -14,19 +14,23 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ["3.11", "3.12", "3.13"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - name: Configure git identity for commit tests
         run: |
           git config --global user.email ci@example.com
           git config --global user.name ci
-      - name: Unit and end-to-end hook tests
-        run: python -m unittest discover -s tests -v
+      - name: Standard-library tests, no dependencies installed
+        run: python -m unittest discover -s tests
+      - name: Property tests
+        run: |
+          python -m pip install hypothesis
+          python -m unittest tests.test_properties -v
       - name: Demo
         run: ./demo/run-demo.sh
       - name: Installable package
@@ -35,25 +39,50 @@ jobs:
           phi-gate --version
           phi-gate explain > /dev/null
 
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e '.[dev]'
+      - name: Lint
+        run: ruff check src tests bench
+      - name: Types
+        run: mypy
+      - name: Shell scripts
+        run: shellcheck hooks/run.sh bin/phi-gate demo/run-demo.sh
+      - name: phi-gate scans its own repository
+        run: phi-gate scan .
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Build
+        run: |
+          python -m pip install build twine
+          python -m build
+          twine check --strict dist/*
+      - name: Install the wheel somewhere clean
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          cd /tmp && /tmp/clean/bin/phi-gate --version
+
   plugin:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: 22
+          node-version: 24
       - name: Validate plugin and marketplace manifests
         run: |
-          npm install -g @anthropic-ai/claude-code
+          npm install -g @anthropic-ai/claude-code@2.1.316
           claude plugin validate . --strict
           claude plugin validate .claude-plugin/plugin.json --strict
-
-  self-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: phi-gate scans its own repository (tests/demo are allowlisted)
-        run: PYTHONPATH=src python -m phi_gate scan .
