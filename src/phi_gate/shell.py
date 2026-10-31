@@ -186,6 +186,7 @@ def _git_subcommand(seg: list[str], start: int) -> tuple[str, list[str]]:
 _GIT_OBJECT_PATH = re.compile(r"^[\w./@^~{}-]*:(?!//)(.+)$")
 _DEV_STREAM = re.compile(r"^/(?:dev/(?:std(?:out|err)|fd/|tty)|proc/self/fd/)")
 FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
+PHI_GATE_SAFE = {"scan", "redact", "status", "explain", "--version", "--help", "-h"}
 
 
 def analyze(command: str, cwd: Path, depth: int = 0) -> Analysis:
@@ -197,7 +198,7 @@ def analyze(command: str, cwd: Path, depth: int = 0) -> Analysis:
     feeds = any(x in command for x in ("$(", "`", "xargs"))
     bases = [cwd]
     variables: dict[str, str] = {}
-    any_reading = False
+    reading_text: list[str] = []
 
     for seg in segments(tokenize(command)):
         name, idx = _command_word(seg)
@@ -227,6 +228,12 @@ def analyze(command: str, cwd: Path, depth: int = 0) -> Analysis:
             continue
 
         reading = bool(name) and (name not in NON_READING or feeds)
+        if name == "phi-gate":
+            # phi-gate's own read-only commands print locations or redacted
+            # text, so the files they name are not exposed. --map writes the
+            # original values out, so it counts as a read.
+            sub = args[0] if args else ""
+            reading = sub not in PHI_GATE_SAFE or any(a.startswith("--map") for a in args)
         extra_bases: list[Path] = []
         if name == "git":
             sub, sub_args = _git_subcommand(seg, idx)
@@ -291,7 +298,8 @@ def analyze(command: str, cwd: Path, depth: int = 0) -> Analysis:
 
         input_paths = {os.path.normpath(str(_abs(x, bases[-1]))) for x in inputs}
         recursive = name in RECURSIVE_READERS or any(a in ("-r", "-R", "--recursive") for a in args)
-        any_reading |= reading
+        if reading:
+            reading_text.append(" ".join(seg))
         for p in resolved_reads:
             try:
                 if p.is_file():
@@ -302,10 +310,11 @@ def analyze(command: str, cwd: Path, depth: int = 0) -> Analysis:
             except OSError:
                 continue
 
-    # Paths anywhere in the command text: heredoc bodies, inline scripts,
-    # values assigned to variables. Only when something in it reads files.
-    if any_reading:
-        embedded = [m.group(0) for m in _EMBEDDED_PATH.finditer(command[:MAX_EMBEDDED_SCAN])]
+    # Paths anywhere in the text of reading segments: heredoc bodies, inline
+    # scripts, arguments the per-word analysis could not attribute.
+    if reading_text:
+        joined = "\n".join(reading_text)[:MAX_EMBEDDED_SCAN]
+        embedded = [m.group(0) for m in _EMBEDDED_PATH.finditer(joined)]
         for p in _resolve(embedded, bases):
             try:
                 if p.is_file():

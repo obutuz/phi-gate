@@ -33,21 +33,16 @@ and when it cannot run, it blocks instead of letting things through.
 Every block is written to `.phi-gate/audit.jsonl` with the event, tool, target file and
 the categories found. Never values, never hashes of values.
 
-## What it looks like in a real session
+## How a Claude Code session goes
 
-Headless Claude Code 2.1, plugin loaded with `--plugin-dir`, a synthetic patient
-export in `data/export.csv`, permission mode `bypassPermissions`:
-
-> **You:** Run this exact shell command and show me the output: `python3 -c "print(open('data/export.csv').read())"`
->
-> **Claude:** The command didn't run. The phi-gate hook blocked it because `data/export.csv` looks like it contains PHI (flagged at line 2). I haven't read the file another way, and I won't try to get around the block.
->
-> Your options:
-> - **See a redacted copy:** I can run `phi-gate redact data/export.csv`, which prints the file with typed placeholders in place of identifiers.
-> - **If the file is synthetic test data:** add its path to `allow_paths` in `.phi-gate.toml`. I can't edit that file, so you'd need to do it.
-
-Hooks run whatever the permission mode, so this holds even when every permission
-prompt is skipped.
+1. Claude tries `head -5 data/denials-export.csv`. The `PreToolUse` hook scans the file,
+   finds a patient table, and denies the command with a message telling Claude why and
+   what to do instead.
+2. Claude runs `phi-gate redact data/denials-export.csv > copy.csv`. phi-gate's own
+   read-only commands are allowed, and the copy keeps the table's shape: identifier
+   columns become `[PATIENT_NAME_1]`, `[DOB_1]`, `[MEMBER_ID_1]`, while payer, CARC code
+   and amount stay as they were.
+3. Claude totals the copy and answers. Everything it saw went through phi-gate first.
 
 ## Install
 
@@ -98,30 +93,10 @@ git clone https://github.com/obutuz/phi-gate && cd phi-gate
 ./demo/run-demo.sh
 ```
 
-The script replays the hook calls Claude Code makes against a throwaway project:
+The script replays the hook calls Claude Code makes against a throwaway project with
+synthetic data and prints each decision, then the audit log:
 
-```text
-1. Prompts
-BLOCKED  prompt with a patient name and DOB
-ALLOWED  prompt about the task, no identifiers
-
-2. Reading files
-BLOCKED  Read data/denials-export.csv
-BLOCKED  Bash: head -3 data/denials-export.csv
-ALLOWED  Read src/report.py
-ALLOWED  Bash: phi-gate redact data/denials-export.csv
-
-3. Writing code and fixtures
-BLOCKED  Write a seed file with a real-format SSN
-ALLOWED  Write a seed file with synthetic values
-
-4. Guardrail integrity
-BLOCKED  Edit .phi-gate.toml
-BLOCKED  git commit --no-verify
-
-5. Outbound
-BLOCKED  Slack MCP message with a member ID
-```
+![demo/run-demo.sh output: prompts, reads, writes, guardrail edits and a Slack message, each blocked or allowed](docs/images/demo.png)
 
 ## The CLI
 
@@ -134,12 +109,23 @@ phi-gate status                     # config and recent audit events
 phi-gate explain                    # every detector and the decision rules
 ```
 
-Redaction is typed and consistent, so the structure survives:
+**Scan** a project. Output names the file, line, severity and category, never the value:
 
-```text
-$ echo "Patient Name: Jane Doe, DOB: 04/12/1980, SSN 123-45-6789" | phi-gate redact
-Patient Name: [PERSON_NAME_1], DOB: [DOB_1], SSN [SSN_1]
-```
+![phi-gate scan output for a sample billing project](docs/images/scan.png)
+
+**Redact** a file or a stream. Placeholders are typed and consistent within a file, tables
+keep their columns, and clinical and financial columns are left alone so the copy is still
+useful for analysis:
+
+![phi-gate redact output for a CSV export and a free-text note](docs/images/redact.png)
+
+**Commit** checks run in the git pre-commit hook, for any editor or agent:
+
+![a git commit blocked by the phi-gate pre-commit hook](docs/images/commit.png)
+
+**Audit**: every decision the hooks make is logged with event, tool, target and category:
+
+![phi-gate status showing configuration and recent audit events](docs/images/status.png)
 
 ## How detection works
 
@@ -260,10 +246,11 @@ Be clear-eyed about what a pattern scanner on a developer machine can and cannot
 - This is a Claude Code plugin. claude.ai and Cowork do not install plugins that ship a
   `bin/` folder.
 
+
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests     # 92 tests, standard library only
+python3 -m unittest discover -s tests     # 97 tests, standard library only
 ./demo/run-demo.sh
 claude plugin validate . --strict
 ```
@@ -279,6 +266,7 @@ skills/             hipaa-aware-dev skill and references
 commands/           /phi-gate:scan, /phi-gate:redact, /phi-gate:status
 tests/              unit, end-to-end hook and bypass-regression tests (synthetic data only)
 bench/              false-positive sweep
+docs/images/        README screenshots (synthetic data only)
 ```
 
 Issues and pull requests are welcome, especially new healthcare formats and real-world

@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 description: Scan files, a folder, or staged git changes for likely PHI (reports locations and categories, never values)
 argument-hint: "[path ...] | --staged"
 allowed-tools: Bash(phi-gate scan:*)

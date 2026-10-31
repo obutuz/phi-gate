@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 description: Show phi-gate configuration and recent block events
 allowed-tools: Bash(phi-gate status:*)
 ---

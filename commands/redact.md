@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 description: Print a copy of a file with typed placeholders instead of identifiers
 argument-hint: "<file>"
 allowed-tools: Bash(phi-gate redact:*)

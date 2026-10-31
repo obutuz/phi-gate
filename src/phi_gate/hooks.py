@@ -321,7 +321,19 @@ def decide(event: str, payload: dict, cfg: Config) -> Outcome:
             effective = {"block": "flagged", "warn": WARN, "audit": "audited"}[cfg.mode]
         else:
             effective = {"block": BLOCK, "warn": WARN, "audit": "audited"}[cfg.mode]
-        audit.record(cfg, event=event, decision=effective, verdict=v, tool=tool, target=target, session_id=session)
+        note = None
+        if not (v and v.findings):
+            if "human-managed" in msg:
+                note = "config is human-managed"
+            elif "--no-verify" in msg:
+                note = "hook bypass: --no-verify"
+            elif "core.hooksPath" in msg:
+                note = "hook bypass: core.hooksPath"
+            else:
+                m = re.match(r"phi-gate blocked (.+?): ", msg)
+                note = (m.group(1) if m else msg)[:60]
+        audit.record(cfg, event=event, decision=effective, verdict=v, tool=tool, target=target,
+                     session_id=session, note=note)
         if cfg.mode == "block":
             return Outcome(2, stderr=msg)
         if cfg.mode == "warn":

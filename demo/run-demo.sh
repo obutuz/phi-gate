@@ -21,8 +21,10 @@ bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 call() {  # event, json payload, label
   local out rc
   out="$(printf '%s' "$2" | bash "$RUN" "$1" 2>&1)"; rc=$?
-  if [ $rc -eq 2 ]; then printf '\033[31mBLOCKED\033[0m  %s\n         %s\n' "$3" "$out"
-  else printf '\033[32mALLOWED\033[0m  %s\n' "$3"; fi
+  if [ $rc -eq 2 ]; then
+    printf '\033[1;31mBLOCKED\033[0m  %s\n' "$3"
+    printf '%s' "$out" | python3 -c 'import sys, textwrap; print("\033[2m" + textwrap.fill(sys.stdin.read().strip(), width=96, initial_indent=" " * 9, subsequent_indent=" " * 9) + "\033[0m")'
+  else printf '\033[1;32mALLOWED\033[0m  %s\n' "$3"; fi
 }
 J() { python3 -c 'import json,sys; print(json.dumps({"cwd": sys.argv[1], "session_id": "demo", "tool_name": sys.argv[2], "tool_input": json.loads(sys.argv[3])}))' "$WORK" "$1" "$2"; }
 
@@ -48,4 +50,9 @@ bold "5. Outbound"
 call PreToolUse "$(J mcp__slack__post_message '{"channel":"#billing","text":"Kevin Osei, member ID W582910446, needs a callback"}')" "Slack MCP message with a member ID"
 
 bold "Audit log (categories only, never values)"
-cat "$WORK/.phi-gate/audit.jsonl" | python3 -c 'import json,sys; [print("  ", e["decision"], e["event"], e.get("tool",""), e.get("categories",{})) for e in map(json.loads, sys.stdin)]'
+python3 - "$WORK/.phi-gate/audit.jsonl" <<'PY'
+import json, sys
+for e in map(json.loads, open(sys.argv[1])):
+    found = ", ".join(f"{k} x{v}" for k, v in e.get("categories", {}).items()) or e.get("note", "")
+    print(f"  {e['decision']:6} {e['event']:17} {e.get('tool', ''):26} {found}")
+PY

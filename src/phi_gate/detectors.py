@@ -278,6 +278,7 @@ def _split_row(line: str, delim: str) -> list[str]:
 
 _RULE_ROW = re.compile(r"^[\s|:+\-=]*$")
 _COLUMN_NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
+_PLACEHOLDER = re.compile(r"^\[[A-Z0-9_]+_\d+\]$")
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 
 
@@ -324,7 +325,18 @@ def tabular_finder(text: str) -> Iterator[Span]:
         while j < n and lines[j].strip() and abs(lines[j].count(delim) - width) <= 1:
             j += 1
         rows = lines[i + 1: j]
-        if rows and any(any(ch.isdigit() for ch in r) and not _RULE_ROW.match(r) for r in rows):
+        all_cols = [_norm_col(c) for c in _split_row(raw, delim)]  # keeps empty edge cells aligned
+        id_cols = [k for k, c in enumerate(all_cols) if c in _DIRECT_COLUMNS or c in _FIRST or c in _LAST]
+
+        def live(row: str) -> bool:
+            """A data row whose identifier cells hold real values (not placeholders)."""
+            if _RULE_ROW.match(row) or not any(ch.isdigit() for ch in row):
+                return False
+            parts = row.rstrip("\r\n").split(delim)
+            vals = [parts[k].strip().strip("\"'") for k in id_cols if k < len(parts)]
+            return any(v and not _PLACEHOLDER.match(v) for v in vals) or not id_cols
+
+        if rows and any(live(r) for r in rows):
             start = offsets[i + 1]
             end = offsets[j - 1] + len(lines[j - 1].rstrip("\r\n"))
             yield (start, end)
@@ -403,7 +415,7 @@ DETECTORS: list[Detector] = [
     ),
     Detector(
         "x12_patient", HIGH, DIRECT, "X12 EDI patient or subscriber name segment (NM1*QC / NM1*IL)",
-        regex_finder(r"NM1\*(?:QC|IL)\*1\*[^*~\n]+\*[^*~\n]+"),
+        regex_finder(r"NM1\*(?:QC|IL)\*1\*[^*~\n]+\*[^~\n]+"),
     ),
     Detector(
         "x12_dob", HIGH, DIRECT, "X12 EDI demographic segment with birth date (DMG*D8)",

@@ -29,20 +29,40 @@ from .scanner import FileResult, iter_files, scan_file, scan_git_diff, worst
 SEV_LABEL = {"high": "HIGH", "medium": "MED ", "low": "LOW "}
 
 
+def _use_color(stream) -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    return hasattr(stream, "isatty") and stream.isatty()
+
+
+def _c(text: str, code: str, stream=None) -> str:
+    return f"\033[{code}m{text}\033[0m" if _use_color(stream or sys.stdout) else text
+
+
+DECISION_COLOR = {"block": "1;31", "warn": "1;33", "allow": "1;32", "flagged": "1;35", "override": "1;34",
+                  "audited": "2", "warning": "1;33"}
+SEV_COLOR = {"high": "31", "medium": "33", "low": "2"}
+
+
 def _print_result(r: FileResult, show_low: bool) -> None:
     if r.skipped:
         return
+    decision = _c(r.verdict.decision.upper(), DECISION_COLOR[r.verdict.decision])
     if r.note == "oversize" and r.blocking:
-        print(f"{r.path}: BLOCK {'; '.join(r.verdict.reasons)}")
+        print(f"{_c(r.path, '1')}: {decision}  {'; '.join(r.verdict.reasons)}")
         return
     shown = [f for f in r.verdict.findings if show_low or f.severity != LOW]
     if not shown and r.verdict.decision == "allow":
         return
-    print(f"{r.path}: {r.verdict.decision.upper()}" + (f"  ({'; '.join(r.verdict.reasons)})" if r.verdict.reasons else ""))
+    reasons = _c(f"  ({'; '.join(r.verdict.reasons)})", "2") if r.verdict.reasons else ""
+    print(f"{_c(r.path, '1')}: {decision}{reasons}")
     for f in shown:
-        print(f"  {r.path}:{f.line}:{f.col}  {SEV_LABEL[f.severity]}  {f.category}")
+        loc = _c(f"{r.path}:{f.line}:{f.col}", "2")
+        print(f"  {loc}  {_c(SEV_LABEL[f.severity], SEV_COLOR[f.severity])}  {f.category}")
     if r.note:
-        print(f"  note: {r.note}")
+        print(_c(f"  note: {r.note}", "2"))
 
 
 def cmd_scan(args) -> int:
@@ -72,7 +92,15 @@ def cmd_scan(args) -> int:
             _print_result(r, args.all)
         scanned = sum(1 for r in results if not r.skipped)
         overall = worst(results)
-        print(f"phi-gate: {scanned} file(s) scanned, result: {overall.upper()}", file=sys.stderr)
+        sys.stdout.flush()
+        verdict = _c(overall.upper(), DECISION_COLOR[overall], sys.stderr)
+        print(f"phi-gate: {scanned} file(s) scanned, result: {verdict}", file=sys.stderr)
+        if args.staged and overall == "block":
+            print(
+                _c("phi-gate: commit blocked.", "1;31", sys.stderr) + " Replace those values with synthetic ones, "
+                "or unstage the files with `git restore --staged <file>`.",
+                file=sys.stderr,
+            )
     return 1 if worst(results) == "block" else 0
 
 
@@ -87,6 +115,7 @@ def cmd_redact(args) -> int:
     text = _read_input(args.file)
     out, mapping = redact(text, cfg, include_low=args.all)
     sys.stdout.write(out)
+    sys.stdout.flush()
     if args.map:
         fd = os.open(args.map, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -97,7 +126,7 @@ def cmd_redact(args) -> int:
             file=sys.stderr,
         )
     else:
-        print(f"\nphi-gate: replaced {len(mapping)} distinct value(s).", file=sys.stderr)
+        print(_c(f"\nphi-gate: replaced {len(mapping)} distinct value(s).", "2", sys.stderr), file=sys.stderr)
     return 0
 
 
@@ -109,19 +138,34 @@ def cmd_restore(args) -> int:
 
 def cmd_status(args) -> int:
     cfg = load(Path.cwd())
+    source = "defaults (no " + CONFIG_NAME + " found)"
+    if cfg.source:
+        try:
+            source = "./" + str(Path(cfg.source).resolve().relative_to(Path.cwd().resolve()))
+        except ValueError:
+            source = str(cfg.source)
     print(f"phi-gate {__version__}")
-    print(f"config:        {cfg.source or 'defaults (no ' + CONFIG_NAME + ' found)'}")
-    print(f"mode:          {cfg.mode}")
-    print(f"allow_paths:   {cfg.allow_paths or '[]'}")
-    print(f"disabled:      {cfg.disable or '[]'}")
-    print(f"max_bytes:     {cfg.max_bytes} (oversize: {cfg.oversize})")
-    print(f"audit_log:     {cfg.audit_log or 'disabled'}")
+    print(f"  config       {source}")
+    print(f"  mode         {cfg.mode}")
+    print(f"  allow_paths  {', '.join(cfg.allow_paths) or 'none'}")
+    print(f"  disabled     {', '.join(cfg.disable) or 'none'}")
+    print(f"  max_bytes    {cfg.max_bytes} (oversize: {cfg.oversize})")
+    print(f"  audit_log    {cfg.audit_log or 'disabled'}")
     events = audit.tail(cfg, args.n)
-    print(f"\nlast {len(events)} audit event(s):")
+    print(f"\nlast {len(events)} audit event(s), newest last (UTC):")
+    rows = []
     for e in events:
-        cats = ", ".join(f"{k} x{v}" for k, v in e.get("categories", {}).items())
-        where = e.get("target") or e.get("tool") or ""
-        print(f"  {e.get('ts')}  {e.get('decision', ''):8} {e.get('event', ''):17} {where}  {cats}")
+        cats = ", ".join(f"{k} x{v}" for k, v in e.get("categories", {}).items()) or e.get("note", "")
+        when = str(e.get("ts", ""))[11:19]
+        where = e.get("target") or ("prompt" if e.get("event") == "UserPromptSubmit" else "")
+        rows.append((when, str(e.get("decision", "")).upper(), e.get("event", ""), e.get("tool") or "", where, cats))
+    if rows:
+        widths = [max(len(r[i]) for r in rows) for i in range(5)]
+        for r in rows:
+            cells = [r[i].ljust(widths[i]) for i in range(5)]
+            cells[0] = _c(cells[0], "2")
+            cells[1] = _c(cells[1], DECISION_COLOR.get(r[1].lower(), "0"))
+            print("  " + "  ".join(cells) + "  " + r[5])
     return 0
 
 

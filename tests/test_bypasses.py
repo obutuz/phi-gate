@@ -319,3 +319,37 @@ class SecondReview(HookTestCase):
         for cmd in ("find .phi-gate -delete", "git clean -fdx"):
             with self.subTest(cmd):
                 self.assertBlocked(self.pre("Bash", {"command": cmd}))
+
+
+class PhiGateInPipelines(HookTestCase):
+    """The safe path (redact, then work from the copy) must not be blocked."""
+
+    def test_redact_to_file_then_read_copy(self):
+        for cmd in (
+            "phi-gate redact data/patients.csv > /tmp/phi-gate-redacted.csv",
+            "mkdir -p /tmp/r && phi-gate redact data/patients.csv > /tmp/r/out.csv && wc -l /tmp/r/out.csv",
+            "phi-gate redact data/patients.csv | python3 -c 'import sys; print(sum(1 for _ in sys.stdin))'",
+            "phi-gate scan data/ && echo ok",
+        ):
+            with self.subTest(cmd):
+                self.assertAllowed(self.pre("Bash", {"command": cmd}))
+
+    def test_still_blocked(self):
+        for cmd in (
+            "phi-gate redact data/patients.csv --map /dev/stdout",
+            "phi-gate redact data/patients.csv > /tmp/x.csv && cat data/patients.csv",
+            "phi-gate scan . ; head data/patients.csv",
+        ):
+            with self.subTest(cmd):
+                self.assertBlocked(self.pre("Bash", {"command": cmd}))
+
+    def test_redacted_copy_is_readable(self):
+        import os
+
+        out = self.dir / "redacted.csv"
+        env = {**os.environ, "PYTHONPATH": str(Path(RUN).resolve().parents[1] / "src")}
+        res = subprocess.run([sys.executable, "-m", "phi_gate", "redact", "data/patients.csv"], cwd=self.dir,
+                             capture_output=True, text=True, env=env)
+        out.write_text(res.stdout)
+        self.assertAllowed(self.pre("Read", {"file_path": str(out)}))
+        self.assertAllowed(self.pre("Bash", {"command": f"cat {out}"}))

@@ -17,7 +17,11 @@ First release.
 - Bash analysis that follows cd, variables, globs, braces, redirections,
   heredocs, command substitution, xargs, bash -c and recursive readers.
 - Internal deadline so a slow check blocks instead of timing out open.
-- Typed, reversible redaction (`phi-gate redact` / `restore`).
+- Typed, reversible redaction (`phi-gate redact` / `restore`). Tables keep their
+  shape: identifier columns become placeholders, clinical and financial columns
+  stay, and a redacted copy is itself allowed through the hooks.
+- Colored CLI output on terminals (`NO_COLOR` / `FORCE_COLOR` respected).
+- README screenshots, including a recorded Claude Code session.
 - Audit log with categories and locations only.
 - `hipaa-aware-dev` skill and `/phi-gate:scan`, `/phi-gate:redact`,
   `/phi-gate:status` commands.
