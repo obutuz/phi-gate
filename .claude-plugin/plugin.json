@@ -1,0 +1,11 @@
+{
+  "name": "phi-gate",
+  "displayName": "phi-gate",
+  "version": "0.1.0",
+  "description": "Fail-closed PHI guardrails for Claude Code: blocks patient identifiers in prompts, file reads, edits, shell commands, commits and outbound tool calls, with a HIPAA-aware development skill.",
+  "author": { "name": "obutuz", "url": "https://github.com/obutuz" },
+  "homepage": "https://github.com/obutuz/phi-gate",
+  "repository": "https://github.com/obutuz/phi-gate",
+  "license": "MIT",
+  "keywords": ["hipaa", "phi", "pii", "healthcare", "security", "hooks", "redaction", "compliance", "dlp"]
+}

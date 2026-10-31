@@ -1,0 +1,7 @@
+- id: phi-gate
+  name: phi-gate (block likely PHI)
+  description: Blocks commits whose files contain likely patient identifiers.
+  entry: phi-gate scan
+  language: python
+  pass_filenames: true
+  types: [text]

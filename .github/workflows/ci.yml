@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Configure git identity for commit tests
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+      - name: Unit and end-to-end hook tests
+        run: python -m unittest discover -s tests -v
+      - name: Demo
+        run: ./demo/run-demo.sh
+      - name: Installable package
+        run: |
+          python -m pip install .
+          phi-gate --version
+          phi-gate explain > /dev/null
+
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate plugin and marketplace manifests
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude plugin validate . --strict
+          claude plugin validate .claude-plugin/plugin.json --strict
+
+  self-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: phi-gate scans its own repository (tests/demo are allowlisted)
+        run: PYTHONPATH=src python -m phi_gate scan .

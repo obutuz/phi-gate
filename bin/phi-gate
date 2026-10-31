@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# phi-gate CLI. Claude Code puts a plugin's bin/ on the Bash tool's PATH, so
+# inside a session this runs as `phi-gate ...`. Outside Claude Code, prefer
+# `pipx install git+https://github.com/obutuz/phi-gate`.
+SELF="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1 && readlink -f "$SELF" >/dev/null 2>&1; then
+  SELF="$(readlink -f "$SELF")"
+fi
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+exec "${PHI_GATE_PYTHON:-python3}" -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from phi_gate.cli import main; sys.exit(main(sys.argv[2:]))' "$ROOT/src" "$@"

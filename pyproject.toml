@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phi-gate"
+version = "0.1.0"
+description = "Fail-closed PHI guardrails for AI coding agents (Claude Code hooks, CLI, git pre-commit)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "obutuz" }]
+keywords = ["hipaa", "phi", "pii", "redaction", "claude-code", "healthcare", "dlp"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Security",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Healthcare Industry",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/obutuz/phi-gate"
+Issues = "https://github.com/obutuz/phi-gate/issues"
+
+[project.scripts]
+phi-gate = "phi_gate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,13 @@
+{
+  "name": "phi-gate",
+  "owner": { "name": "obutuz", "url": "https://github.com/obutuz" },
+  "description": "Healthcare-safe guardrails for AI coding agents.",
+  "plugins": [
+    {
+      "name": "phi-gate",
+      "source": "./",
+      "description": "Fail-closed PHI guardrails for prompts, file reads, edits, shell commands, commits and outbound tool calls.",
+      "version": "0.1.0"
+    }
+  ]
+}

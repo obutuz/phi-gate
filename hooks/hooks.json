@@ -1,0 +1,28 @@
+{
+  "description": "phi-gate: fail-closed PHI guardrails for prompts, file reads, edits, shell commands, commits and outbound tool calls",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" UserPromptSubmit", "timeout": 30 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|Grep|WebFetch|WebSearch|mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" PreToolUse", "timeout": 30 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Grep|WebFetch|mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" PostToolUse", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}

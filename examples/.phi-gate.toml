@@ -1,0 +1,47 @@
+# .phi-gate.toml: put this at your project root. Humans edit it; the Claude
+# Code hooks refuse agent edits to it, so an agent cannot loosen its own rules.
+[phi-gate]
+
+# "block" (default): deny the action. "warn": allow and show a message.
+# "audit": allow silently, log only. Start with "audit" to measure noise.
+mode = "block"
+
+# Paths (relative to this file, glob syntax; * also crosses folders) that hold
+# synthetic data and may be read and written freely.
+allow_paths = [
+  "tests/fixtures/*",
+  "seed/synthetic/*",
+  "*.synthetic.*",       # any depth: * also matches /
+]
+
+# Exact values (full-match regexes) that are known test data.
+allow_values = [
+  "1EG4-TE5-MK73",   # CMS's published sample MBI
+]
+
+# Categories to switch off entirely. See `phi-gate explain`.
+disable = []
+
+# A clinical fact (diagnosis code, date of service) within this many
+# characters of a name, phone, email or address counts as a patient record.
+record_window = 400
+
+# Files bigger than this are blocked unscanned ("block") or scanned up to the
+# limit ("scan_head").
+max_bytes = 5000000
+oversize = "block"
+
+# Where block/override events are logged. Values are never written. "" disables.
+audit_log = ".phi-gate/audit.jsonl"
+
+# A prompt starting with this token is sent even if it contains PHI (logged).
+# Use only where your organisation has a BAA covering the model provider.
+# "" disables the override.
+prompt_override_token = "#phi-ok"
+
+# Scan Bash, Grep, WebFetch and MCP output after it arrives and tell Claude
+# not to propagate any PHI it contains.
+scan_tool_output = true
+
+# Show non-blocking warnings (lone emails, phone numbers) in the session.
+warn_in_hooks = false
