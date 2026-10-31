@@ -1,0 +1,5 @@
+# Tests write made-up SSNs to temporary files on purpose, to prove phi-gate
+# blocks them. They do not ship, so scanning them only reports that fixture.
+name: phi-gate
+paths-ignore:
+  - tests
