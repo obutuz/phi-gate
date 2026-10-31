@@ -12,43 +12,90 @@ from __future__ import annotations
 
 from .config import Config
 from .detectors import (
-    _DIRECT_COLUMNS, _FIRST, _LAST, _QUASI, _RULE_ROW, DIRECT, HIGH, LOW, SEVERITY_RANK, Finding, _norm_col, run_detectors,
+    _FIRST,
+    _LAST,
+    _QUASI,
+    _RULE_ROW,
+    DIRECT,
+    HIGH,
+    LOW,
+    SEVERITY_RANK,
+    Finding,
+    _norm_col,
+    cell_spans,
+    header_delimiter,
+    is_direct_column,
+    logical_rows,
+    run_detectors,
 )
 
-# Columns that hold health information rather than identity. Safe Harbor
-# removes identifiers; the clinical content can stay, which is what makes a
-# redacted export still useful ("group denials by diagnosis").
+# Columns that describe care or an organisation rather than a person. Safe
+# Harbor removes identifiers; this content can stay, which is what keeps a
+# redacted export useful ("group denials by diagnosis").
 _KEEP_COLUMNS = {"diagnosis", "dx", "icd10", "icd_10", "icd10_code", "diagnosis_code"}
-_IDENTIFIER_COLUMNS = (_DIRECT_COLUMNS | _FIRST | _LAST | _QUASI) - _KEEP_COLUMNS
+_KEEP_TOKENS = {"payer", "plan", "provider", "facility", "clinic", "carrier", "organization"}
+
+# Words that mark a column as identifying someone. This list errs on the side
+# of redacting: the cost of a false match is one less useful column.
+_IDENTIFIER_TOKENS = {
+    "name", "patient", "client", "member", "subscriber", "insured", "beneficiary",
+    "guarantor", "contact", "address", "address1", "address2", "street", "city", "zip", "zipcode",
+    "postal", "phone", "mobile", "fax", "email", "ssn", "dob", "mrn", "mbi", "birth", "birthdate",
+    "note", "notes", "comment", "comments", "memo", "narrative",
+}
+
+
+def is_identifier_column(col: str) -> bool:
+    if col in _KEEP_COLUMNS:
+        return False
+    tokens = set(col.split("_"))
+    if tokens & _KEEP_TOKENS:
+        return False
+    return is_direct_column(col) or col in _FIRST or col in _LAST or col in _QUASI or bool(tokens & _IDENTIFIER_TOKENS)
+
+
+def _cell_finding(row: str, offset: int, span: tuple[int, int], category: str) -> Finding | None:
+    """The cell's value without its padding or quotes, so they survive."""
+    a, b = span
+    while a < b and row[a] in ' \t"':
+        a += 1
+    while b > a and row[b - 1] in ' \t"':
+        b -= 1
+    return Finding(category, HIGH, DIRECT, offset + a, offset + b) if a < b else None
 
 
 def _table_cells(text: str, f: Finding) -> list[Finding]:
     """Turn one tabular finding into per-cell findings for identifier columns,
-    so the redacted table keeps its shape and its non-identifying columns."""
+    so the redacted table keeps its shape and its non-identifying columns. A
+    row that does not line up with the header cannot be trusted column by
+    column, so all of it goes."""
     header_end = text.rfind("\n", 0, f.start)
     header_start = text.rfind("\n", 0, max(header_end, 0)) + 1
     header = text[header_start:max(header_end, 0)].rstrip("\r")
-    delim = next((d for d in (",", "\t", "|", ";") if header.count(d) >= 2), None)
+    delim = header_delimiter(header)
     if delim is None:
         return [f]
-    cols = [_norm_col(c) for c in header.split(delim)]
-    targets = {i for i, c in enumerate(cols) if c in _IDENTIFIER_COLUMNS}
+    cols = [_norm_col(header[a:b]) for a, b in cell_spans(header, delim)]
+    targets = {i for i, c in enumerate(cols) if is_identifier_column(c)}
     if not targets:
         return [f]
+    lines = text[f.start:f.end].splitlines(keepends=True)
+    offsets = [f.start]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
     cells: list[Finding] = []
-    pos = f.start
-    for line in text[f.start:f.end].split("\n"):
-        offset = pos
-        if _RULE_ROW.match(line):  # markdown separator row
-            pos += len(line) + 1
+    for first, last in logical_rows(lines, 0, len(lines)):
+        row = "".join(lines[first:last + 1]).rstrip("\r\n")
+        if _RULE_ROW.match(row):
             continue
-        for idx, piece in enumerate(line.rstrip("\r").split(delim)):
-            stripped = piece.strip()
-            if idx in targets and stripped:
-                start = offset + (len(piece) - len(piece.lstrip()))
-                cells.append(Finding(cols[idx], HIGH, DIRECT, start, start + len(stripped)))
-            offset += len(piece) + 1
-        pos += len(line) + 1
+        spans = cell_spans(row, delim)
+        if len(spans) != len(cols):
+            found = _cell_finding(row, offsets[first], (0, len(row)), "row")
+            cells += [found] if found else []
+            continue
+        for idx in targets:
+            found = _cell_finding(row, offsets[first], spans[idx], cols[idx])
+            cells += [found] if found else []
     return cells
 
 

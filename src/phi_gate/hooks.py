@@ -284,6 +284,7 @@ def decide(event: str, payload: dict, cfg: Config) -> Outcome:
     if event in TOOL_EVENTS and not (isinstance(tool, str) and tool):
         raise ValueError(f"{event} payload has no tool_name")
 
+    v: Verdict | None
     if event == "UserPromptSubmit":
         prompt = payload.get("prompt")
         if not isinstance(prompt, str):

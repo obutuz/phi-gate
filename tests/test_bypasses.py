@@ -12,9 +12,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from test_hooks import PHI_CSV, RUN, SSN, HookTestCase  # noqa: E402
+
 from phi_gate.config import Config, ConfigError  # noqa: E402
 from phi_gate.scanner import scan_text  # noqa: E402
-from test_hooks import PHI_CSV, RUN, SSN, HookTestCase  # noqa: E402
 
 
 def git(cwd, *args):

@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Callable, Iterator
 
 HIGH = "high"
 MEDIUM = "medium"
@@ -40,6 +40,10 @@ class Detector:
     group: str
     description: str
     find: Finder
+    # Lowercase substrings, at least one of which any match must contain. A
+    # substring test is far cheaper than a regex tried at every position, and
+    # most source files contain none of these words.
+    hints: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -194,6 +198,12 @@ DATE = (
 # Separator between a label and its value: handles `DOB: x`, `dob = "x"`,
 # `"birthDate": "x"` and `'dob': 'x'`.
 SEP = r"""["']?\s*[:=#]?\s*["']?\s*"""
+# Where a label can start. `\b` would miss `patient_dob` (underscore) and
+# `patientDob` (a lower-to-upper camelCase step).
+LB = r"(?:(?<![A-Za-z0-9])|(?-i:(?<=[a-z])(?=[A-Z])))"
+# Between the words of a label: `date of birth`, `date_of_birth`, `dateOfBirth`.
+W = r"[\s_-]*"
+NUM = r"(?:\#|no\.?|num(?:ber)?)"
 
 NAME = r"[A-Z][a-z'\-]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z'\-]+){1,2}|[A-Z][a-z'\-]+,\s*[A-Z][a-z'\-]+"
 
@@ -214,7 +224,7 @@ def _ssn_valid(m: re.Match) -> bool:
 
 
 def _ssn_bare_valid(m: re.Match) -> bool:
-    v = m.group("v")
+    v = re.sub(r"\D", "", m.group("v"))
     return ssn_area_ok(v[:3], v[3:5], v[5:])
 
 
@@ -240,8 +250,17 @@ def _ip_valid(m: re.Match) -> bool:
     return ip.is_global
 
 
-def _group_has_digit(name: str) -> Callable[[re.Match], bool]:
-    return lambda m: has_digit(m.group(name))
+# Column types and encodings that follow an id in schemas and code, such as
+# `patient_id INT8`. They contain digits but they are not identifiers.
+_TYPE_NAME = re.compile(r"(?i)^(?:u?int|float|serial|char|varchar|sha|md|utf|base|uuid|bytea)-?\d*$")
+
+
+def _id_value(name: str) -> Callable[[re.Match], bool]:
+    def valid(m: re.Match) -> bool:
+        value = m.group(name)
+        return has_digit(value) and not _TYPE_NAME.match(value)
+
+    return valid
 
 
 # --------------------------------------------------------------------------
@@ -249,14 +268,17 @@ def _group_has_digit(name: str) -> Callable[[re.Match], bool]:
 # --------------------------------------------------------------------------
 
 _DIRECT_COLUMNS = {
-    "ssn", "social_security_number", "social_security", "ss_number",
-    "dob", "date_of_birth", "birth_date", "birthdate",
-    "mrn", "medical_record_number", "medical_record_no", "chart_number",
-    "member_id", "subscriber_id", "medicaid_id", "medicare_id", "mbi",
-    "medicaid_number", "medicare_number", "insurance_id", "policy_number",
+    "social_security_number", "social_security", "ss_number",
+    "date_of_birth", "birth_date", "birthdate",
+    "medical_record_number", "medical_record_no", "chart_number",
+    "member_id", "member_number", "member_name", "subscriber_id", "subscriber_name",
+    "medicaid_id", "medicare_id", "medicaid_number", "medicare_number",
+    "insurance_id", "policy_number",
     "patient_name", "patient_full_name", "client_name", "beneficiary_name",
     "insured_name", "patient_id", "client_id_number",
 }
+# Any column with one of these words, such as `patient_dob` or `ssn_last4`.
+_DIRECT_TOKENS = {"ssn", "dob", "mrn", "mbi"}
 _FIRST = {"first_name", "firstname", "fname", "given_name", "patient_first_name"}
 _LAST = {"last_name", "lastname", "lname", "family_name", "surname", "patient_last_name"}
 _QUASI = {
@@ -272,19 +294,91 @@ def _norm_col(col: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", col).strip("_")
 
 
-def _split_row(line: str, delim: str) -> list[str]:
-    return line.split(delim)
+def cell_spans(row: str, delim: str) -> list[tuple[int, int]]:
+    """(start, end) of each cell. A delimiter inside double quotes is data."""
+    spans = []
+    start = 0
+    if '"' not in row:
+        for piece in row.split(delim):
+            spans.append((start, start + len(piece)))
+            start += len(piece) + len(delim)
+        return spans
+    quoted = False
+    for i, ch in enumerate(row):
+        if ch == '"':
+            quoted = not quoted
+        elif ch == delim and not quoted:
+            spans.append((start, i))
+            start = i + 1
+    spans.append((start, len(row)))
+    return spans
 
 
+def header_delimiter(row: str) -> str | None:
+    return next((d for d in (",", "\t", "|", ";") if d in row), None)
+
+
+def logical_rows(lines: list[str], start: int, stop: int) -> Iterator[tuple[int, int]]:
+    """(first, last) line indexes of each row. A quoted cell can span lines, so
+    a line with an unbalanced quote continues on the next one."""
+    i = start
+    while i < stop:
+        last = i
+        open_quote = lines[i].count('"') % 2 == 1
+        while open_quote and last + 1 < stop and last - i < MAX_ROW_LINES:
+            last += 1
+            open_quote ^= lines[last].count('"') % 2 == 1
+        yield i, last
+        i = last + 1
+
+
+MAX_ROW_LINES = 50
 _RULE_ROW = re.compile(r"^[\s|:+\-=]*$")
 _COLUMN_NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 _PLACEHOLDER = re.compile(r"^\[[A-Z0-9_]+_\d+\]$")
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+_PERSON_NAME = re.compile(rf"(?:{NAME})$")
+# A tuple, or a line of a list of strings. Not any trailing comma: spreadsheets
+# and many real exports end every row with a delimiter.
+_CODE_LINE = re.compile(r"""^\s*\(|^\s*["'][^"']*["'],\s.*,\s*$""")
+# Quick rejections, so that ordinary lines of code never reach the cell logic.
+_NOT_A_HEADER = re.compile(r"[={}\[\]<>:]")
+_HEADER_WORD = re.compile(r"(?i)ssn|dob|mrn|mbi|name|patient|birth|member|subscriber|medic|insur|polic|chart|social|client|benefic")
+
+
+def is_direct_column(col: str) -> bool:
+    return col in _DIRECT_COLUMNS or bool(_DIRECT_TOKENS & set(col.split("_")))
+
+
+def _is_header(raw: str, delim: str, cells: list[str]) -> bool:
+    """Whether a row reads as column names rather than prose with commas.
+    Two columns are weak evidence, so a table that narrow must not contain a
+    multi-word cell that is not a known column."""
+    names = [_norm_col(c) for c in cells]
+    if len(names) < 2 or _LIST_ITEM.match(raw) or _CODE_LINE.search(raw):
+        return False
+    if not all(_COLUMN_NAME.match(c) for c in names) or any(len(c.split()) > 4 for c in cells):
+        return False
+    return len(names) > 2 or all(is_direct_column(n) or len(c.split()) == 1 for n, c in zip(names, cells, strict=True))
+
+
+def _live_row(row: str, delim: str, id_cols: list[int], name_cols: set[int]) -> bool:
+    """A data row whose identifier cells hold real values, not placeholders."""
+    if _RULE_ROW.match(row):
+        return False
+    parts = [row[a:b].strip(" \t\"'") for a, b in cell_spans(row, delim)]
+    values = [(k, parts[k]) for k in id_cols if k < len(parts)]
+    if not any(v and not _PLACEHOLDER.match(v) for _, v in values):
+        return False
+    # A table of pure text can still be a patient list: its digit-free rows
+    # count when a name column holds what looks like a person's name.
+    return any(ch.isdigit() for ch in row) or any(k in name_cols and _PERSON_NAME.match(v) for k, v in values)
 
 
 def tabular_finder(text: str) -> Iterator[Span]:
     """CSV/TSV/pipe tables whose header names patient identifiers and which
-    contain at least one data row."""
+    contain at least one data row. A table runs to the next blank line; rows
+    of the wrong width stay in the span, so redaction can deal with them."""
     lines = text.splitlines(keepends=True)
     offsets = []
     pos = 0
@@ -295,54 +389,43 @@ def tabular_finder(text: str) -> Iterator[Span]:
     n = len(lines)
     while i < n:
         raw = lines[i].rstrip("\r\n")
-        delim = None
-        for d in (",", "\t", "|", ";"):
-            if raw.count(d) >= 2:
-                delim = d
-                break
-        if delim is None:
+        delim = header_delimiter(raw)
+        if delim is None or _NOT_A_HEADER.search(raw) or not _HEADER_WORD.search(raw):
             i += 1
             continue
-        raw_cells = [c for c in _split_row(raw, delim) if c.strip()]
+        raw_cells = [raw[a:b] for a, b in cell_spans(raw, delim)]
+        present = [c for c in raw_cells if c.strip()]
+        if not _is_header(raw, delim, present):
+            i += 1
+            continue
         cells = [_norm_col(c) for c in raw_cells]
-        looks_like_header = (
-            len(cells) >= 2
-            and not _LIST_ITEM.match(raw)
-            and all(_COLUMN_NAME.match(c) for c in cells)
-            and all(len(c.split()) <= 4 for c in raw_cells)
-        )
-        if not looks_like_header:  # prose with commas, not a header row
-            i += 1
-            continue
         cols = set(cells)
-        direct = cols & _DIRECT_COLUMNS
+        direct = any(is_direct_column(c) for c in cols)
         name_pair = bool(cols & _FIRST) and bool(cols & _LAST)
         if not (direct or (name_pair and cols & _QUASI)):
             i += 1
             continue
-        width = raw.count(delim)
         j = i + 1
-        while j < n and lines[j].strip() and abs(lines[j].count(delim) - width) <= 1:
+        while j < n and lines[j].strip():
             j += 1
-        rows = lines[i + 1: j]
-        all_cols = [_norm_col(c) for c in _split_row(raw, delim)]  # keeps empty edge cells aligned
-        id_cols = [k for k, c in enumerate(all_cols) if c in _DIRECT_COLUMNS or c in _FIRST or c in _LAST]
-
-        def live(row: str) -> bool:
-            """A data row whose identifier cells hold real values (not placeholders)."""
-            if _RULE_ROW.match(row) or not any(ch.isdigit() for ch in row):
-                return False
-            parts = row.rstrip("\r\n").split(delim)
-            vals = [parts[k].strip().strip("\"'") for k in id_cols if k < len(parts)]
-            return any(v and not _PLACEHOLDER.match(v) for v in vals) or not id_cols
-
-        if rows and any(live(r) for r in rows):
-            start = offsets[i + 1]
-            end = offsets[j - 1] + len(lines[j - 1].rstrip("\r\n"))
-            yield (start, end)
-            i = j
-        else:
-            i += 1
+        id_cols = [k for k, c in enumerate(cells) if is_direct_column(c) or c in _FIRST or c in _LAST]
+        name_cols = {k for k in id_cols if "name" in cells[k].split("_")}
+        # A wide header is rare enough in code to trust on its own, so a
+        # malformed row in that table still counts. A narrow one is not: `dob,
+        # mrn` could be a line of a program, so its rows must line up.
+        width = len(raw_cells)
+        live = False
+        for first, last in logical_rows(lines, i + 1, j):
+            row = "".join(lines[first:last + 1]).rstrip("\r\n")
+            lines_up = width > 3 or len(cell_spans(row, delim)) == width
+            if lines_up and _live_row(row, delim, id_cols, name_cols):
+                live = True
+                break
+        if live:
+            yield offsets[i + 1], offsets[j - 1] + len(lines[j - 1].rstrip("\r\n"))
+        # The rows are consumed either way, so input of repeated header-like
+        # lines stays linear.
+        i = max(j, i + 1)
 
 
 _FHIR_PATIENT = re.compile(r'"resourceType"\s*:\s*"Patient"')
@@ -366,11 +449,12 @@ DETECTORS: list[Detector] = [
         regex_finder(r"(?<![\d-])(?P<a>\d{3})-(?P<g>\d{2})-(?P<s>\d{4})(?![\d-])", validate=_ssn_valid),
     ),
     Detector(
-        "ssn", HIGH, DIRECT, "Labelled 9-digit SSN",
+        "ssn", HIGH, DIRECT, "Labelled SSN (bare, spaced or dotted digits)",
         regex_finder(
-            r"(?i)\b(?:ssn|social\s+security(?:\s+(?:number|no\.?|#))?)" + SEP + r"(?P<v>\d{9})\b",
+            rf"(?i){LB}(?:ssn|social{W}security(?:{W}{NUM})?)" + SEP + r"(?P<v>\d{3}[ .-]?\d{2}[ .-]?\d{4})(?![\d-])",
             group="v", validate=_ssn_bare_valid,
         ),
+        ("ssn", "social"),
     ),
     Detector(
         "medicare_mbi", HIGH, DIRECT, "Medicare Beneficiary Identifier",
@@ -381,59 +465,76 @@ DETECTORS: list[Detector] = [
     Detector(
         "mrn", HIGH, DIRECT, "Labelled medical record / patient / chart number",
         regex_finder(
-            r"(?i)\b(?:mrn|medical\s+record(?:\s*(?:number|no\.?|#))?|patient\s*(?:id|#|no\.?|number)"
-            r"|chart\s*(?:#|no\.?|number))" + SEP + r"(?P<v>[A-Z0-9][A-Z0-9-]{3,19})\b",
-            group="v", validate=_group_has_digit("v"),
+            rf"(?i){LB}(?:mrn|medical{W}record(?:{W}{NUM})?|patient{W}(?:id|{NUM})"
+            rf"|chart{W}{NUM})" + SEP + r"(?P<v>[A-Z0-9][A-Z0-9-]{3,19})\b",
+            group="v", validate=_id_value("v"),
         ),
+        ("mrn", "medical", "patient", "chart"),
     ),
     Detector(
         "member_id", HIGH, DIRECT, "Labelled health plan member / subscriber / Medicaid ID",
         regex_finder(
-            r"(?i)\b(?:member|subscriber|beneficiary|policy(?:holder)?|insurance|medicaid|medicare)"
-            r"\s*(?:id|#|no\.?|number)" + SEP + r"(?P<v>[A-Z0-9][A-Z0-9-]{4,19})\b",
-            group="v", validate=_group_has_digit("v"),
+            rf"(?i){LB}(?:(?:member|subscriber|beneficiary|policy{W}holder|insurance|medicaid|medicare)"
+            rf"{W}(?:id|{NUM})|policy{W}{NUM})" + SEP + r"(?P<v>[A-Z0-9][A-Z0-9-]{4,19})\b",
+            group="v", validate=_id_value("v"),
         ),
+        ("member", "subscriber", "beneficiary", "policy", "insurance", "medicaid", "medicare"),
     ),
     Detector(
         "dob", HIGH, DIRECT, "Labelled date of birth",
         regex_finder(
-            r"(?i)\b(?:dob|d\.o\.b\.?|date\s+of\s+birth|birth\s*date|birthdate|born(?:\s+on)?)"
+            rf"(?i){LB}(?:dob|d\.o\.b\.?|date{W}of{W}birth|birth{W}date|born(?:\s+on)?)"
             + SEP + rf"(?P<v>{DATE})",
             group="v",
         ),
+        ("dob", "d.o.b", "birth", "born"),
     ),
     Detector(
         "account_number", HIGH, DIRECT, "Labelled financial account number",
         regex_finder(
-            r"(?i)\b(?:account|acct|bank\s+account|iban)\s*(?:number|no\.?|#)" + SEP + r"(?P<v>\d[\d -]{5,24}\d)",
+            rf"(?i){LB}(?:account|acct|bank{W}account|iban){W}{NUM}" + SEP + r"(?P<v>\d[\d -]{5,24}\d)",
             group="v",
         ),
+        ("account", "acct", "iban"),
     ),
     Detector(
         "payment_card", HIGH, DIRECT, "Payment card number (Luhn-valid, test cards excluded)",
-        regex_finder(r"(?<![\w-])\d(?:[ -]?\d){12,18}(?![\w-])", validate=lambda m: card_ok(m.group(0))),
+        # Unbroken, or grouped the way cards are printed (4-4-4-4, 4-6-5). The
+        # guards skip the fractional digits of a float.
+        regex_finder(
+            r"(?<![\w.-])(?:\d{13,19}|\d{4}([ -])\d{4}\1\d{4}\1\d{1,7}|\d{4}([ -])\d{6}\2\d{5})(?![\w-]|\.\d)",
+            validate=lambda m: card_ok(m.group(0)),
+        ),
     ),
     Detector(
         "x12_patient", HIGH, DIRECT, "X12 EDI patient or subscriber name segment (NM1*QC / NM1*IL)",
-        regex_finder(r"NM1\*(?:QC|IL)\*1\*[^*~\n]+\*[^~\n]+"),
+        regex_finder(r"NM1([*|^])(?:QC|IL)\1(?:1)\1[^~\r\n]+"),
+        ("nm1",),
     ),
     Detector(
         "x12_dob", HIGH, DIRECT, "X12 EDI demographic segment with birth date (DMG*D8)",
-        regex_finder(r"DMG\*D8\*\d{8}"),
+        regex_finder(r"DMG([*|^])D8\1\d{8}"),
+        ("dmg",),
     ),
     Detector(
         "hl7_pid", HIGH, DIRECT, "HL7 v2 PID segment with a patient name",
-        regex_finder(r"(?m)^PID\|[^\r\n]*\^[^\r\n]*$"),
+        # Real HL7 separates segments with CR, not LF.
+        regex_finder(r"(?<![^\r\n])PID\|[^\r\n]*\^[^\r\n]*"),
+        ("pid|",),
     ),
-    Detector("fhir_patient", HIGH, DIRECT, "FHIR Patient resource with name or birthDate", fhir_patient_finder),
+    Detector(
+        "fhir_patient", HIGH, DIRECT, "FHIR Patient resource with name or birthDate", fhir_patient_finder,
+        ('"resourcetype"',),
+    ),
     Detector("tabular_phi", HIGH, DIRECT, "Delimited table with patient identifier columns and data rows", tabular_finder),
     Detector(
         "person_name", HIGH, PERSON, "Patient/member/client name in a labelled field",
         regex_finder(
-            r"\b(?i:patient|pt|client|member|beneficiary|resident|insured|subscriber|guarantor)(?:'s)?"
-            r"\s*_?(?i:full\s*_?)?(?i:name)" + SEP + rf"(?P<v>{NAME})",
+            rf"{LB}(?i:patient|pt|client|member|beneficiary|resident|insured|subscriber|guarantor)(?:'s)?"
+            rf"{W}(?i:full{W})?(?i:name)" + SEP + rf"(?P<v>{NAME})",
             group="v", validate=lambda m: not_org_name(m.group("v")),
         ),
+        ("name",),
     ),
     Detector(
         "person_name", MEDIUM, PERSON, "Generic labelled full name",
@@ -441,22 +542,25 @@ DETECTORS: list[Detector] = [
             r"\b(?i:full\s*_?name|name)" + SEP + rf"(?P<v>{NAME})",
             group="v", validate=lambda m: not_org_name(m.group("v")),
         ),
+        ("name",),
     ),
     Detector(
         "diagnosis", MEDIUM, CLINICAL, "Labelled ICD-10 diagnosis code",
         regex_finder(
-            r"(?i)\b(?:dx|diagnosis|diag|icd-?10)(?:\s*code)?" + SEP
+            rf"(?i){LB}(?:dx|diagnosis|diag|icd{W}10)(?:{W}code)?" + SEP
             + r"(?P<v>(?-i:[A-TV-Z]\d[0-9AB](?:\.[0-9A-TV-Z]{1,4})?))\b",
             group="v",
         ),
+        ("dx", "diag", "icd"),
     ),
     Detector(
         "clinical_date", MEDIUM, CLINICAL, "Labelled admission, discharge, service or death date",
         regex_finder(
-            r"(?i)\b(?:date\s+of\s+service|dos|admi(?:t|ssion)\s+date|discharge\s+date|date\s+of\s+death|dod)"
+            rf"(?i){LB}(?:date{W}of{W}service|dos|admi(?:t|ssion){W}date|discharge{W}date|date{W}of{W}death|dod)"
             + SEP + rf"(?P<v>{DATE})",
             group="v",
         ),
+        ("service", "dos", "admi", "discharge", "death", "dod"),
     ),
     Detector(
         "phone", MEDIUM, CONTACT, "US phone number (toll-free and 555-01xx excluded)",
@@ -502,8 +606,9 @@ def run_detectors(text: str, disabled: set[str] | frozenset[str] = frozenset()) 
     """Run every enabled detector. Line and column are filled in by the scanner."""
     out: list[Finding] = []
     seen: set[tuple[str, int, int]] = set()
+    lowered = text.lower()
     for det in DETECTORS:
-        if det.name in disabled:
+        if det.name in disabled or (det.hints and not any(hint in lowered for hint in det.hints)):
             continue
         for s, e in det.find(text):
             key = (det.name, s, e)

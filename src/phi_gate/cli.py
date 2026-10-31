@@ -4,6 +4,7 @@
     phi-gate redact [FILE|-] [--map MAP.json] [--all]
     phi-gate restore --map MAP.json [FILE|-]
     phi-gate status
+    phi-gate audit verify
     phi-gate explain
     phi-gate install-git-hook [--force]
     phi-gate hook <EventName>          (used by Claude Code)
@@ -21,10 +22,10 @@ import sys
 from pathlib import Path
 
 from . import __version__, audit, hooks
-from .config import CONFIG_NAME, ConfigError, load
+from .config import CONFIG_NAME, Config, ConfigError, load
 from .detectors import DETECTORS, LOW
 from .redact import redact, restore
-from .scanner import FileResult, iter_files, scan_file, scan_git_diff, worst
+from .scanner import FileResult, Unreadable, decode_bytes, iter_files, read_text, scan_file, scan_git_diff, worst
 
 SEV_LABEL = {"high": "HIGH", "medium": "MED ", "low": "LOW "}
 
@@ -104,15 +105,18 @@ def cmd_scan(args) -> int:
     return 1 if worst(results) == "block" else 0
 
 
-def _read_input(path: str | None) -> str:
-    if not path or path == "-":
-        return sys.stdin.read()
-    return Path(path).read_text(encoding="utf-8", errors="replace")
+def _read_input(path: str | None, cfg: Config) -> str:
+    if path and path != "-":
+        return read_text(path, cfg)
+    text = decode_bytes(sys.stdin.buffer.read())
+    if text is None:
+        raise Unreadable("cannot read stdin: binary data")
+    return text
 
 
 def cmd_redact(args) -> int:
     cfg = load(Path.cwd())
-    text = _read_input(args.file)
+    text = _read_input(args.file, cfg)
     out, mapping = redact(text, cfg, include_low=args.all)
     sys.stdout.write(out)
     sys.stdout.flush()
@@ -132,7 +136,7 @@ def cmd_redact(args) -> int:
 
 def cmd_restore(args) -> int:
     mapping = json.loads(Path(args.map).read_text(encoding="utf-8"))
-    sys.stdout.write(restore(_read_input(args.file), mapping))
+    sys.stdout.write(restore(_read_input(args.file, load(Path.cwd())), mapping))
     return 0
 
 
@@ -146,10 +150,12 @@ def cmd_status(args) -> int:
             source = str(cfg.source)
     print(f"phi-gate {__version__}")
     print(f"  config       {source}")
+    print(f"  managed      {cfg.managed or 'none'}")
     print(f"  mode         {cfg.mode}")
     print(f"  allow_paths  {', '.join(cfg.allow_paths) or 'none'}")
     print(f"  disabled     {', '.join(cfg.disable) or 'none'}")
     print(f"  max_bytes    {cfg.max_bytes} (oversize: {cfg.oversize})")
+    print(f"  opaque       {cfg.opaque}")
     print(f"  audit_log    {cfg.audit_log or 'disabled'}")
     events = audit.tail(cfg, args.n)
     print(f"\nlast {len(events)} audit event(s), newest last (UTC):")
@@ -167,6 +173,15 @@ def cmd_status(args) -> int:
             cells[1] = _c(cells[1], DECISION_COLOR.get(r[1].lower(), "0"))
             print("  " + "  ".join(cells) + "  " + r[5])
     return 0
+
+
+def cmd_audit_verify(args) -> int:
+    report = audit.verify(load(Path.cwd()))
+    if report.intact:
+        print(f"phi-gate: audit chain intact, {report.events} event(s)")
+        return 0
+    print(f"phi-gate: audit chain broken at line {report.broken_line}: {report.problem}", file=sys.stderr)
+    return 1
 
 
 def cmd_explain(args) -> int:
@@ -242,6 +257,11 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("-n", type=int, default=15)
     st.set_defaults(func=cmd_status)
 
+    au = sub.add_parser("audit", help="work with the audit log")
+    au_sub = au.add_subparsers(dest="audit_cmd", required=True)
+    verify = au_sub.add_parser("verify", help="check the log's hash chain; exit 1 if it is broken")
+    verify.set_defaults(func=cmd_audit_verify)
+
     ex = sub.add_parser("explain", help="list detectors and decision rules")
     ex.set_defaults(func=cmd_explain)
 
@@ -262,7 +282,10 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"phi-gate configuration error: {exc}", file=sys.stderr)
         return 2
-    except RuntimeError as exc:
+    except FileNotFoundError as exc:
+        print(f"phi-gate: no such file or directory: {exc.filename or exc}", file=sys.stderr)
+        return 2
+    except (RuntimeError, Unreadable, OSError, ValueError) as exc:
         print(f"phi-gate: {exc}", file=sys.stderr)
         return 2
 

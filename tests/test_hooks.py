@@ -170,7 +170,7 @@ class BashTests(HookTestCase):
 
 class OutboundTests(HookTestCase):
     def test_blocks_mcp_message_with_phi(self):
-        res = self.pre("mcp__slack__post_message", {"channel": "#billing", "text": f"Patient Name: Jane Doe, MRN: 00482913"})
+        res = self.pre("mcp__slack__post_message", {"channel": "#billing", "text": "Patient Name: Jane Doe, MRN: 00482913"})
         self.assertBlocked(res)
 
     def test_blocks_webfetch_with_phi_in_url(self):

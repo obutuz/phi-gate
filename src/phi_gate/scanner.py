@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,12 +29,15 @@ OPAQUE_MAGIC = (
     b"%PDF", b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"SQLite format 3", b"\xd0\xcf\x11\xe0",
     b"\x1f\x8b", b"PAR1", b"II*\x00", b"MM\x00*", b"RIFF", b"7z\xbc\xaf", b"Rar!",
 )
-SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".next", "dist", "build", ".phi-gate", ".svelte-kit"}
+SKIP_DIRS = {
+    ".git", "node_modules", ".venv", "venv", "__pycache__", ".next", "dist", "build", ".phi-gate", ".svelte-kit",
+    ".mypy_cache", ".ruff_cache", ".pytest_cache", ".hypothesis", ".tox",
+}
 
 
 def _line_index(text: str) -> list[int]:
     starts = [0]
-    for m in re.finditer("\n", text):
+    for m in re.finditer("\r\n|\r|\n", text):
         starts.append(m.end())
     return starts
 
@@ -99,9 +103,9 @@ def decode_bytes(raw: bytes) -> str | None:
     ):
         if raw.startswith(bom):
             return raw.decode(enc, errors="replace")
-    enc = _utf16_guess(raw[:SNIFF])
-    if enc:
-        return raw.decode(enc, errors="replace")
+    guessed = _utf16_guess(raw[:SNIFF])
+    if guessed:
+        return raw.decode(guessed, errors="replace")
     if _looks_binary(raw[:SNIFF]):
         return None
     return raw.decode("utf-8", errors="replace")
@@ -132,8 +136,9 @@ def _xlsx_text(zf: zipfile.ZipFile) -> str:
             for c in row.iter(_NS + "c"):
                 kind = c.get("t")
                 v = c.find(_NS + "v")
-                if kind == "s" and v is not None and (v.text or "").isdigit() and int(v.text) < len(shared):
-                    val = shared[int(v.text)]
+                index = v.text if v is not None and v.text else ""
+                if kind == "s" and index.isdigit() and int(index) < len(shared):
+                    val = shared[int(index)]
                 elif kind == "inlineStr":
                     val = "".join(t.text or "" for t in c.iter(_NS + "t"))
                 else:
@@ -235,6 +240,40 @@ def sqlite_text(path: Path, rows_per_table: int = 500) -> str:
 # --------------------------------------------------------------------------
 
 
+def _extract(p: Path, raw: bytes, cfg: Config, oversize: bool) -> tuple[str | None, str]:
+    """The text a file holds, whatever it is wrapped in, and a note saying how
+    it was read. The text is None when phi-gate cannot read the format."""
+    if raw.startswith(b"PK\x03\x04") and not oversize:
+        return archive_text(p, cfg.max_bytes), "archive contents"
+    if raw.startswith(b"\x1f\x8b"):
+        with gzip.open(p, "rb") as gz:
+            decoded = decode_bytes(gz.read(cfg.max_bytes))
+        return decoded, "gzip contents" if decoded is not None else "gzip of binary data, not inspected"
+    if raw.startswith(b"SQLite format 3\x00"):
+        return sqlite_text(p), "sqlite tables"
+    if raw.startswith(OPAQUE_MAGIC):
+        return None, "binary format, content not inspected"
+    text = decode_bytes(raw)
+    if text is None:
+        return None, "binary, not inspected"
+    return text, f"scanned first {cfg.max_bytes} bytes only" if oversize else ""
+
+
+def read_text(path: str | Path, cfg: Config) -> str:
+    """Decode a file the way the scanner does, for commands that must see the
+    same text it saw. Raises Unreadable rather than returning garbage."""
+    p = Path(path)
+    with p.open("rb") as fh:
+        raw = fh.read(cfg.max_bytes)
+    try:
+        text, note = _extract(p, raw, cfg, p.stat().st_size > cfg.max_bytes)
+    except (EOFError, gzip.BadGzipFile) as exc:
+        raise Unreadable(f"cannot read {p.name}: {exc}") from exc
+    if text is None:
+        raise Unreadable(f"cannot read {p.name}: {note}")
+    return text
+
+
 def scan_file(path: str | Path, cfg: Config, base: Path | None = None) -> FileResult:
     p = Path(path)
     if not p.is_absolute():
@@ -246,36 +285,27 @@ def scan_file(path: str | Path, cfg: Config, base: Path | None = None) -> FileRe
         if p.is_dir():
             return FileResult(rel, Verdict(ALLOW), "directory", skipped=True)
         size = p.stat().st_size
+        oversize = size > cfg.max_bytes
+        if oversize and cfg.oversize == "block":
+            reason = f"file is {size} bytes, over max_bytes={cfg.max_bytes}; not scanned"
+            return FileResult(rel, Verdict(BLOCK, [], [reason]), "oversize")
+        with p.open("rb") as fh:
+            raw = fh.read(cfg.max_bytes)
+    except FileNotFoundError:
+        return FileResult(rel, Verdict(ALLOW), "file not found", skipped=True)
     except OSError as exc:
-        return FileResult(rel, Verdict(ALLOW), f"unreadable: {exc.strerror}", skipped=True)
-    oversize = size > cfg.max_bytes
-    if oversize and cfg.oversize == "block":
-        return FileResult(
-            rel, Verdict(BLOCK, [], [f"file is {size} bytes, over max_bytes={cfg.max_bytes}; not scanned"]), "oversize"
-        )
-    with p.open("rb") as fh:
-        raw = fh.read(cfg.max_bytes)
-    note = f"scanned first {cfg.max_bytes} bytes only" if oversize else ""
+        return FileResult(rel, Verdict(BLOCK, [], [f"cannot read file ({exc.strerror}); not inspected"]), "unreadable")
 
+    if raw[128:132] == b"DICM":  # the patient's name and ID are in the header of every image
+        return FileResult(rel, Verdict(BLOCK, [], ["DICOM file; patient metadata not inspected"]), "dicom")
     try:
-        if raw.startswith(b"PK\x03\x04") and not oversize:
-            return FileResult(rel, scan_text(archive_text(p, cfg.max_bytes), cfg), "archive contents")
-        if raw.startswith(b"\x1f\x8b"):
-            with gzip.open(p, "rb") as gz:
-                inner = gz.read(cfg.max_bytes)
-            decoded = decode_bytes(inner)
-            if decoded is not None:
-                return FileResult(rel, scan_text(decoded, cfg), "gzip contents")
-            return FileResult(rel, Verdict(ALLOW), "gzip of binary data, not inspected", skipped=True)
-        if raw.startswith(b"SQLite format 3\x00"):
-            return FileResult(rel, scan_text(sqlite_text(p), cfg), "sqlite tables")
+        text, note = _extract(p, raw, cfg, oversize)
     except (Unreadable, OSError, EOFError, gzip.BadGzipFile) as exc:
         return FileResult(rel, Verdict(BLOCK, [], [f"unreadable container ({exc}); not inspected"]), "unreadable")
-    if raw.startswith(OPAQUE_MAGIC):
-        return FileResult(rel, Verdict(ALLOW), "binary format, content not inspected", skipped=True)
-    text = decode_bytes(raw)
     if text is None:
-        return FileResult(rel, Verdict(ALLOW), "binary, not inspected", skipped=True)
+        if cfg.opaque == "block":
+            return FileResult(rel, Verdict(BLOCK, [], [f"{note} (opaque = block)"]), "opaque")
+        return FileResult(rel, Verdict(ALLOW), note, skipped=True)
     return FileResult(rel, scan_text(text, cfg), note)
 
 
@@ -288,7 +318,8 @@ def walk(root: Path, limit: int) -> list[Path] | None:
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(
-            d for d in dirnames if d not in SKIP_DIRS and os.path.join(dirpath, d) not in SKIP_ABS
+            d for d in dirnames
+            if d not in SKIP_DIRS and not d.endswith(".egg-info") and os.path.join(dirpath, d) not in SKIP_ABS
         )
         for name in sorted(filenames):
             p = Path(dirpath) / name
@@ -308,6 +339,8 @@ def iter_files(paths: list[str], cfg: Config):
             yield p
         elif p.is_dir():
             yield from walk(p, 10**9) or []
+        else:  # a gate must not report a clean scan of a path it never saw
+            raise FileNotFoundError(raw)
 
 
 # --------------------------------------------------------------------------
@@ -317,7 +350,8 @@ def iter_files(paths: list[str], cfg: Config):
 
 def _git(args: list[str], cwd: Path) -> str:
     res = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
+        ["git", "-c", "core.quotepath=off", *args],
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
     )
     if res.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {res.stderr.strip()}")
@@ -331,25 +365,37 @@ def git_toplevel(cwd: Path) -> Path | None:
         return None
 
 
+_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
 def added_lines_by_file(diff: str) -> dict[str, list[tuple[int, str]]]:
-    """Parse `git diff -U0` output into {path: [(new_line_no, text), ...]}."""
+    """Parse `git diff -U0` output into {path: [(new_line_no, text), ...]}.
+
+    Hunk headers say how many lines follow, and those are counted rather than
+    recognised by their prefix: an added line reading `++ /dev/null` appears in
+    the diff as `+++ /dev/null` and must not be taken for a file header."""
     files: dict[str, list[tuple[int, str]]] = {}
     current: str | None = None
-    lineno = 0
-    for line in diff.splitlines():
+    lineno = old_left = new_left = 0
+    for line in diff.split("\n"):
+        if old_left or new_left:
+            if line.startswith("+"):
+                new_left -= 1
+                if current is not None:
+                    files[current].append((lineno, line[1:]))
+                lineno += 1
+            elif line.startswith("-"):
+                old_left -= 1
+            continue
         if line.startswith("+++ "):
-            target = line[4:]
+            target = line[4:].rstrip("\t")
             current = None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
             if current is not None:
                 files.setdefault(current, [])
-        elif line.startswith("@@"):
-            try:
-                lineno = int(line.split("+", 1)[1].split(" ", 1)[0].split(",")[0])
-            except (IndexError, ValueError):
-                lineno = 0
-        elif line.startswith("+") and current is not None:
-            files[current].append((lineno, line[1:]))
-            lineno += 1
+        elif m := _HUNK.match(line):
+            old_left = int(m.group(1) or 1)
+            lineno = int(m.group(2))
+            new_left = int(m.group(3) or 1)
     return files
 
 
@@ -370,12 +416,50 @@ def _scan_diff(diff: str, top: Path, cfg: Config) -> list[FileResult]:
     return results
 
 
+def _binary_paths(top: Path, staged: bool) -> list[str]:
+    """Changed files git treats as binary. They have no added lines in a diff,
+    and that is every spreadsheet, archive, database and UTF-16 export."""
+    args = ["diff", *(["--cached"] if staged else []), "--numstat", "-z", "--no-renames", "--diff-filter=ACM"]
+    fields = (record.split("\t", 2) for record in _git(args, top).split("\0"))
+    return [f[2] for f in fields if len(f) == 3 and f[0] == "-"]
+
+
+def _scan_staged_blob(cfg: Config, top: Path, path: str) -> FileResult:
+    """Scan what the commit would contain, which can differ from the working tree."""
+    full = top / path
+    rel = cfg.relpath(full)
+    if cfg.is_allowed_path(full):
+        return FileResult(rel, Verdict(ALLOW), "allowlisted path", skipped=True)
+    size = int(_git(["cat-file", "-s", f":{path}"], top))
+    if size > cfg.max_bytes:
+        reason = f"staged file is {size} bytes, over max_bytes={cfg.max_bytes}; not scanned"
+        return FileResult(rel, Verdict(BLOCK, [], [reason]), "oversize")
+    blob = subprocess.run(["git", "show", f":{path}"], cwd=top, capture_output=True, timeout=15)
+    if blob.returncode != 0:
+        return FileResult(rel, Verdict(BLOCK, [], ["cannot read staged file; not inspected"]), "unreadable")
+    with tempfile.TemporaryDirectory(prefix="phi-gate-") as tmp:
+        copy = Path(tmp) / Path(path).name
+        copy.write_bytes(blob.stdout)
+        result = scan_file(copy, cfg)
+    result.path = rel
+    return result
+
+
+def _scan_staged(cfg: Config, top: Path) -> list[FileResult]:
+    results = _scan_diff(_git(["diff", "--cached", *DIFF_FLAGS], top), top, cfg)
+    return results + [_scan_staged_blob(cfg, top, p) for p in _binary_paths(top, staged=True)]
+
+
+def _scan_unstaged(cfg: Config, top: Path) -> list[FileResult]:
+    results = _scan_diff(_git(["diff", *DIFF_FLAGS], top), top, cfg)
+    return results + [scan_file(top / p, cfg) for p in _binary_paths(top, staged=False)]
+
+
 def scan_git_diff(cfg: Config, cwd: Path, staged: bool = True) -> list[FileResult]:
     top = git_toplevel(cwd)
     if top is None:
         raise RuntimeError("not a git repository")
-    args = ["diff", "--cached", *DIFF_FLAGS] if staged else ["diff", *DIFF_FLAGS]
-    return _scan_diff(_git(args, top), top, cfg)
+    return _scan_staged(cfg, top) if staged else _scan_unstaged(cfg, top)
 
 
 def scan_commit(cfg: Config, cwd: Path, broad: bool) -> list[FileResult]:
@@ -385,9 +469,9 @@ def scan_commit(cfg: Config, cwd: Path, broad: bool) -> list[FileResult]:
     top = git_toplevel(cwd)
     if top is None:
         return []
-    results = _scan_diff(_git(["diff", "--cached", *DIFF_FLAGS], top), top, cfg)
+    results = _scan_staged(cfg, top)
     if broad:
-        results += _scan_diff(_git(["diff", *DIFF_FLAGS], top), top, cfg)
+        results += _scan_unstaged(cfg, top)
         untracked = [u for u in _git(["ls-files", "-o", "--exclude-standard", "-z"], top).split("\0") if u]
         if len(untracked) > MAX_UNTRACKED:
             results.append(FileResult(
@@ -409,6 +493,7 @@ def worst(results: list[FileResult]) -> str:
 
 
 __all__ = [
-    "FileResult", "scan_text", "scan_file", "scan_git_diff", "scan_commit", "iter_files", "walk",
-    "added_lines_by_file", "worst", "decode_bytes", "archive_text", "sqlite_text", "LOW", "MEDIUM", "MAX_DIR_FILES",
+    "FileResult", "Unreadable", "scan_text", "scan_file", "scan_git_diff", "scan_commit", "iter_files", "walk",
+    "added_lines_by_file", "worst", "decode_bytes", "archive_text", "sqlite_text", "read_text", "LOW", "MEDIUM",
+    "MAX_DIR_FILES",
 ]

@@ -8,6 +8,10 @@ guardrails.
 Unknown keys and bad values raise ConfigError. The hooks turn that into a
 block (fail-closed), because a silently ignored typo in an allowlist or mode
 setting is worse than a loud error.
+
+A security team can also install a managed policy at a path developers and
+agents cannot write to. It is a floor: a repository can tighten it but never
+loosen it. See `_apply_floor`.
 """
 
 from __future__ import annotations
@@ -30,6 +34,8 @@ STATE_DIR = ".phi-gate"
 
 MODES = ("block", "warn", "audit")
 OVERSIZE = ("block", "scan_head")
+OPAQUE = ("allow", "block")
+MANAGED_PATHS = ("/etc/phi-gate/policy.toml", "/Library/Application Support/phi-gate/policy.toml")
 
 
 class ConfigError(Exception):
@@ -44,6 +50,7 @@ class Config:
     record_window: int = 400
     max_bytes: int = 5_000_000
     oversize: str = "block"
+    opaque: str = "allow"
     allow_paths: list[str] = field(default_factory=list)
     disable: list[str] = field(default_factory=list)
     allow_values: list[str] = field(default_factory=list)
@@ -52,6 +59,7 @@ class Config:
     prompt_override_token: str = "#phi-ok"
     scan_tool_output: bool = True
     warn_in_hooks: bool = False
+    managed: Path | None = None
 
     _allow_value_rx: list[re.Pattern] = field(default_factory=list, repr=False, init=False)
 
@@ -59,7 +67,7 @@ class Config:
         self.validate()
 
     def validate(self) -> None:
-        for name in ("mode", "oversize", "audit_log", "prompt_override_token"):
+        for name in ("mode", "oversize", "opaque", "audit_log", "prompt_override_token"):
             if not isinstance(getattr(self, name), str):
                 raise ConfigError(f"{name} must be a string")
         for name in ("record_window", "max_bytes"):
@@ -73,6 +81,8 @@ class Config:
             raise ConfigError(f"mode must be one of {MODES}, got {self.mode!r}")
         if self.oversize not in OVERSIZE:
             raise ConfigError(f"oversize must be one of {OVERSIZE}, got {self.oversize!r}")
+        if self.opaque not in OPAQUE:
+            raise ConfigError(f"opaque must be one of {OPAQUE}, got {self.opaque!r}")
         if self.record_window < 0:
             raise ConfigError("record_window must be a non-negative integer")
         if self.max_bytes <= 0:
@@ -112,7 +122,7 @@ class Config:
 
 
 KEYS = {
-    "mode", "record_window", "max_bytes", "oversize", "allow_paths", "disable",
+    "mode", "record_window", "max_bytes", "oversize", "opaque", "allow_paths", "disable",
     "allow_values", "audit_log", "protect_config", "prompt_override_token",
     "scan_tool_output", "warn_in_hooks",
 }
@@ -133,25 +143,68 @@ def find_config(start: Path) -> Path | None:
     return None
 
 
-def load(start: str | os.PathLike | None = None) -> Config:
-    start_path = Path(start) if start else Path.cwd()
-    path = find_config(start_path)
-    if path is None:
-        return Config(root=start_path.resolve())
+def _read_settings(path: Path) -> dict:
     if tomllib is None:
         raise ConfigError("phi-gate needs Python 3.11+ to read .phi-gate.toml")
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot parse {path}: {exc}") from exc
     section = data.get("phi-gate", data)
     unknown = sorted(set(section) - KEYS - {"phi-gate"})
     if unknown:
         raise ConfigError(f"{path}: unknown keys {unknown}")
-    kwargs = {k: v for k, v in section.items() if k in KEYS}
+    settings = {k: v for k, v in section.items() if k in KEYS}
     for key in ("allow_paths", "disable", "allow_values"):
-        if key in kwargs and not (
-            isinstance(kwargs[key], list) and all(isinstance(x, str) for x in kwargs[key])
+        if key in settings and not (
+            isinstance(settings[key], list) and all(isinstance(x, str) for x in settings[key])
         ):
             raise ConfigError(f"{path}: {key} must be a list of strings")
-    return Config(root=path.parent.resolve(), source=path, **kwargs)
+    return settings
+
+
+def find_managed() -> Path | None:
+    env = os.environ.get("PHI_GATE_MANAGED_CONFIG")
+    if env:
+        p = Path(env)
+        if not p.is_file():
+            raise ConfigError(f"PHI_GATE_MANAGED_CONFIG points to a missing file: {env}")
+        return p
+    return next((p for p in map(Path, MANAGED_PATHS) if p.is_file()), None)
+
+
+def _stricter(order: tuple[str, ...], managed: str, local: str) -> str:
+    return managed if order.index(managed) < order.index(local) else local
+
+
+def _apply_floor(local: dict, floor: dict) -> dict:
+    """Merge a repository's settings over a managed policy. Where they differ
+    the stricter value wins. Exceptions are the policy's to grant, so if it
+    sets a list, the repository's list for that key is ignored rather than
+    added to it."""
+    merged = {**local, **floor}
+    if "mode" in floor and "mode" in local:
+        merged["mode"] = _stricter(MODES, floor["mode"], local["mode"])
+    if "oversize" in floor and "oversize" in local:
+        merged["oversize"] = _stricter(OVERSIZE, floor["oversize"], local["oversize"])
+    if "opaque" in floor and "opaque" in local:
+        merged["opaque"] = _stricter(("block", "allow"), floor["opaque"], local["opaque"])
+    if "max_bytes" in floor and "max_bytes" in local:
+        merged["max_bytes"] = min(floor["max_bytes"], local["max_bytes"])
+    if "record_window" in floor and "record_window" in local:
+        merged["record_window"] = max(floor["record_window"], local["record_window"])
+    for key in ("protect_config", "scan_tool_output"):
+        if floor.get(key) is True:
+            merged[key] = True
+    return merged
+
+
+def load(start: str | os.PathLike | None = None) -> Config:
+    start_path = Path(start) if start else Path.cwd()
+    path = find_config(start_path)
+    managed = find_managed()
+    settings = _read_settings(path) if path else {}
+    if managed:
+        settings = _apply_floor(settings, _read_settings(managed))
+    root = path.parent.resolve() if path else start_path.resolve()
+    return Config(root=root, source=path, managed=managed, **settings)

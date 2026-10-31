@@ -86,7 +86,7 @@ def _expand_vars(word: str, cwd: Path) -> str:
 def _expand_braces(word: str) -> list[str]:
     results = [word]
     for _ in range(3):
-        nxt = []
+        nxt: list[str] = []
         changed = False
         for w in results:
             m = _BRACE.match(w)
@@ -232,22 +232,22 @@ def analyze(command: str, cwd: Path, depth: int = 0) -> Analysis:
             # phi-gate's own read-only commands print locations or redacted
             # text, so the files they name are not exposed. --map writes the
             # original values out, so it counts as a read.
-            sub = args[0] if args else ""
-            reading = sub not in PHI_GATE_SAFE or any(a.startswith("--map") for a in args)
+            action = args[0] if args else ""
+            reading = action not in PHI_GATE_SAFE or any(a.startswith("--map") for a in args)
         extra_bases: list[Path] = []
         if name == "git":
-            sub, sub_args = _git_subcommand(seg, idx)
-            if sub == "commit":
+            git_cmd, sub_args = _git_subcommand(seg, idx)
+            if git_cmd == "commit":
                 bypass, include_all = commit_flags(sub_args)
                 result.commits.append(Commit(sub_args, bypass, include_all))
-            if sub == "add":
+            if git_cmd == "add":
                 result.stages_changes = True
-            if sub == "diff" and ("--cached" in sub_args or "--staged" in sub_args):
+            if git_cmd == "diff" and ("--cached" in sub_args or "--staged" in sub_args):
                 result.shows_staged = True
-            if sub == "clean" and any(a.startswith("-") and not a.startswith("--") and ("x" in a or "X" in a)
+            if git_cmd == "clean" and any(a.startswith("-") and not a.startswith("--") and ("x" in a or "X" in a)
                                       for a in sub_args):
                 result.writes.append(bases[-1] / ".phi-gate")
-            reading = sub not in GIT_NON_READING or feeds
+            reading = git_cmd not in GIT_NON_READING or feeds
             top = _git_top(bases[-1])
             if top is not None:
                 extra_bases.append(top)

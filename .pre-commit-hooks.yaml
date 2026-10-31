@@ -4,4 +4,3 @@
   entry: phi-gate scan
   language: python
   pass_filenames: true
-  types: [text]

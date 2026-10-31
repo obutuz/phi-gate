@@ -4,6 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from phi_gate.config import Config  # noqa: E402
 from phi_gate.redact import redact, restore  # noqa: E402
 
 
@@ -53,6 +54,60 @@ class Redaction(unittest.TestCase):
 
         out, _ = redact(self.TEXT)
         self.assertEqual(scan_text(out, Config()).decision, "allow")
+
+
+class RedactionCannotLeak(unittest.TestCase):
+    """Redaction is what a block tells an agent to use instead, so a value that
+    survives it reaches the model with phi-gate's blessing."""
+
+    HEADER = "patient_name,dob,member_id,carc,amount\n"
+
+    def assertGone(self, text, *values):
+        out, _ = redact(text, Config())
+        for value in values:
+            self.assertNotIn(value, out)
+        return out
+
+    def test_a_quoted_comma_does_not_shift_the_columns(self):
+        row = '"Lopez, Maria",1984-02-17,W483920175,CO-197,412.50\n'
+        out = self.assertGone(self.HEADER + row, "Lopez", "Maria", "1984-02-17", "W483920175")
+        self.assertIn("CO-197,412.50", out)
+
+    def test_quotes_survive_around_the_placeholder(self):
+        out = self.assertGone(self.HEADER + '"Lopez, Maria",1984-02-17,W483920175,CO-197,412.50\n', "Maria")
+        self.assertIn('"[PATIENT_NAME_1]"', out)
+
+    def test_a_row_of_the_wrong_width_goes_entirely(self):
+        row = "Maria Lopez,1984-02-17,W483920175,CO-197,412.50,extra,more\n"
+        self.assertGone(self.HEADER + row, "Maria Lopez", "W483920175", "extra")
+
+    def test_a_stray_quote_cannot_expose_the_rest_of_the_row(self):
+        self.assertGone(self.HEADER + 'Maria "Mia" Lopez,1984-02-17,W483920175,CO-197,412.50\n', "W483920175")
+
+    def test_a_cell_spanning_lines(self):
+        text = 'patient_name,address,mrn\n"Maria Lopez","12 Elm St\nApt 4",00482913\n'
+        self.assertGone(text, "Maria", "12 Elm St", "Apt 4", "00482913")
+
+    def test_rows_after_a_malformed_row_are_still_redacted(self):
+        text = self.HEADER + "a,b\nKevin Osei,1979-09-03,W582910446,CO-16,98.00\n"
+        self.assertGone(text, "Kevin Osei", "W582910446")
+
+    def test_identifying_columns_that_are_not_on_any_fixed_list(self):
+        for column, value in (
+            ("full_name", "Maria Lopez"), ("name", "Maria Lopez"), ("patient", "Maria Lopez"),
+            ("city", "Pittsburgh"), ("address2", "Apt 4"), ("fax_number", "412-867-5309"),
+            ("guarantor_name", "Kevin Osei"), ("emergency_contact_phone", "412-867-5309"),
+            ("clinical_notes", "Lives with daughter Ana"),
+        ):
+            with self.subTest(column):
+                self.assertGone(f"{column},dob,mrn,carc\n{value},1984-02-17,00482913,CO-16\n", value)
+
+    def test_clinical_and_organisation_columns_stay(self):
+        text = "patient_name,dob,payer_name,provider_name,diagnosis_code,amount\n"
+        text += "Maria Lopez,1984-02-17,Aetna,Dr Shah Clinic,F84.0,412.50\n"
+        out = self.assertGone(text, "Maria Lopez")
+        for value in ("Aetna", "Dr Shah Clinic", "F84.0", "412.50"):
+            self.assertIn(value, out)
 
 
 if __name__ == "__main__":
