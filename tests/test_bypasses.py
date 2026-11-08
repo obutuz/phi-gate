@@ -119,7 +119,7 @@ class BashReads(HookTestCase):
     def test_remediation_and_metadata_commands_allowed(self):
         git(self.dir, "add", "data/patients.csv")
         for cmd in ("rm data/patients.csv", "git rm --cached data/patients.csv", "wc -l data/patients.csv",
-                    "ls -la data", "mv data/patients.csv /tmp/elsewhere.csv", "ls ~nosuchuser/notes.txt"):
+                    "ls -la data", "mv data/patients.csv data/quarantine.csv", "ls ~nosuchuser/notes.txt"):
             with self.subTest(cmd):
                 self.assertAllowed(self.pre("Bash", {"command": cmd}))
 
