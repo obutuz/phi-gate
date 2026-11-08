@@ -20,6 +20,8 @@ class HookTestCase(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="phi-gate-test-"))
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("PHI_GATE_")}
+        # Claude Code puts the plugin's bin/ on the Bash tool's PATH.
+        self.env["PATH"] = f"{ROOT / 'bin'}{os.pathsep}{self.env.get('PATH', '')}"
         subprocess.run(["git", "init", "-q"], cwd=self.dir, check=True)
         subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=self.dir, check=True)
         subprocess.run(["git", "config", "user.name", "t"], cwd=self.dir, check=True)
