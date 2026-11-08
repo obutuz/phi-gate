@@ -1,0 +1,47 @@
+name: Publish to PyPI
+
+# Uploads the distributions of an existing GitHub release to PyPI, so a
+# release can be published there after the fact. The files are the ones the
+# release workflow built, tested and attested; nothing is rebuilt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, such as v0.2.0
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/phi-gate/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the release's distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
+          mkdir dist
+          gh release download "$TAG" --dir dist --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+          (cd dist && sha256sum --check --ignore-missing SHA256SUMS)
+          rm dist/SHA256SUMS
+      - name: Verify build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in dist/*; do
+            gh attestation verify "$f" --repo "${{ github.repository }}"
+          done
+      - uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0  # v1.9.0
+        with:
+          attestations: true

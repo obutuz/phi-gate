@@ -19,7 +19,7 @@ except ImportError as exc:
 from phi_gate import audit  # noqa: E402
 from phi_gate.config import Config  # noqa: E402
 from phi_gate.detectors import cell_spans  # noqa: E402
-from phi_gate.redact import redact  # noqa: E402
+from phi_gate.redact import redact, restore  # noqa: E402
 from phi_gate.scanner import added_lines_by_file, decode_bytes, scan_text  # noqa: E402
 
 CFG = Config()
@@ -82,6 +82,74 @@ class Redaction(unittest.TestCase):
         rows = [[name, "1984-02-17", member, "CO-197", "412.50"] for name, member in people]
         out, _ = redact(write_csv(rows), CFG)
         self.assertNotIn("tabular_phi", scan_text(out, CFG).summary())
+
+
+# Synthetic identifiers: issued-range SSNs that are not on the dummy list,
+# placeholder names, and record numbers of the shapes the detectors accept.
+ssn = st.builds(
+    lambda a, g, s: f"{a:03d}-{g:02d}-{s:04d}",
+    st.integers(100, 665), st.integers(10, 98), st.integers(1000, 9998),
+)
+person = st.sampled_from(["Jane Doe", "John Smith", "JANE DOE", "SMITH, JOHN", "Maria Lopez", "Kevin Osei"])
+birth = st.sampled_from(["1961-03-14", "03/14/1961", "14-Mar-1961", "March 14th, 1961", "19610314"])
+record_no = st.from_regex(r"[A-Z]{1,3}[0-9]{6,9}", fullmatch=True)
+separator = st.sampled_from([": ", " = ", "#: ", " ", '": "', "\t"])
+field = st.one_of(
+    st.tuples(st.sampled_from(["SSN", "ssn", "SS#", "Social Security Number"]), ssn),
+    st.tuples(st.sampled_from(["DOB", "Date of Birth", "birthDate", "birthday"]), birth),
+    st.tuples(st.sampled_from(["MRN", "MR#", "Pt ID", "patient_id", "Encounter #"]), record_no),
+    st.tuples(st.sampled_from(["Member ID", "Mbr ID", "subscriber_id", "Medicaid ID", "Insured ID"]), record_no),
+    st.tuples(st.sampled_from(["Patient Name", "patientName", "Member Name"]), person),
+)
+
+COLUMNS = {
+    "patient_name": person, "PatientName": person, "First": st.just("Jane"), "Last": st.just("Doe"),
+    "DOB": birth, "DateOfBirth": birth, "Member #": record_no, "Mbr_ID": record_no, "MRN": record_no,
+    "Account #": record_no, "Policy #": record_no, "Medicaid #": record_no, "SSN": ssn,
+    "Payer": st.sampled_from(["Aetna", "Gold Plan"]), "amount": st.sampled_from(["12.00", "412.50"]),
+    "dx": st.sampled_from(["F84.0", "E11.9"]),
+}
+
+
+@st.composite
+def tables(draw):
+    names = draw(st.lists(st.sampled_from(sorted(COLUMNS)), min_size=3, max_size=6, unique=True))
+    names = [*names, "MRN"] if not any(n in ("MRN", "SSN", "DOB", "DateOfBirth") for n in names) else names
+    rows = draw(st.lists(st.tuples(*(COLUMNS[n] for n in names)), min_size=1, max_size=5))
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(names)
+    if draw(st.booleans()):
+        out.write("\n")  # a blank line under the header
+    for k, row in enumerate(rows):
+        if k and draw(st.booleans()):
+            out.write("\n")  # a blank line between rows
+        writer.writerow(row)
+    return out.getvalue()
+
+
+def high_findings(text):
+    return [f.category for f in scan_text(text, CFG).findings if f.severity == "high"]
+
+
+class RedactionLeavesNothingToBlock(unittest.TestCase):
+    """What redaction returns must pass the scanner that sent the agent to it."""
+
+    @QUICK
+    @given(st.lists(st.tuples(field, separator), min_size=1, max_size=6), st.sampled_from([", ", "\n", "; "]))
+    def test_records(self, fields, joiner):
+        text = joiner.join(f"{label}{sep}{value}" for (label, value), sep in fields)
+        out, mapping = redact(text, CFG)
+        self.assertEqual(high_findings(out), [], (text, out))
+        self.assertEqual(restore(out, mapping), text)
+
+    @QUICK
+    @given(tables())
+    def test_tables(self, text):
+        self.assertIn("tabular_phi", {f.category for f in scan_text(text, CFG).findings})
+        out, mapping = redact(text, CFG)
+        self.assertEqual(high_findings(out), [], (text, out))
+        self.assertEqual(restore(out, mapping), text)
 
 
 class DiffParser(unittest.TestCase):

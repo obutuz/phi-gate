@@ -9,9 +9,12 @@ import html
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import zipfile
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,11 +55,15 @@ def _locate(findings: list[Finding], text: str, line_map: list[int] | None = Non
     return out
 
 
-def scan_text(text: str, cfg: Config, line_map: list[int] | None = None) -> Verdict:
+def _findings(text: str, cfg: Config, line_map: list[int] | None = None) -> list[Finding]:
     findings = run_detectors(text, frozenset(cfg.disable))
     if cfg.allow_values:
         findings = [f for f in findings if not cfg.is_allowed_value(text[f.start:f.end])]
-    return evaluate(_locate(findings, text, line_map), cfg.record_window)
+    return _locate(findings, text, line_map)
+
+
+def scan_text(text: str, cfg: Config, line_map: list[int] | None = None) -> Verdict:
+    return evaluate(_findings(text, cfg, line_map), cfg.record_window)
 
 
 @dataclass
@@ -312,14 +319,16 @@ def scan_file(path: str | Path, cfg: Config, base: Path | None = None) -> FileRe
 SKIP_ABS = {"/proc", "/sys", "/dev", "/run"}
 
 
-def walk(root: Path, limit: int) -> list[Path] | None:
-    """Files under root, skipping vendored/build dirs. Stops early and returns
+def walk(root: Path, limit: int, keep: set[str] | frozenset[str] = frozenset()) -> list[Path] | None:
+    """Files under root, skipping vendored and build directories other than
+    those named in `keep` (`.git` is always skipped). Stops early and returns
     None as soon as there are more than `limit` files."""
+    skip = SKIP_DIRS - (set(keep) - {".git"})
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(
             d for d in dirnames
-            if d not in SKIP_DIRS and not d.endswith(".egg-info") and os.path.join(dirpath, d) not in SKIP_ABS
+            if d not in skip and not d.endswith(".egg-info") and os.path.join(dirpath, d) not in SKIP_ABS
         )
         for name in sorted(filenames):
             p = Path(dirpath) / name
@@ -349,23 +358,47 @@ def iter_files(paths: list[str], cfg: Config):
 
 
 def _git(args: list[str], cwd: Path) -> str:
-    res = subprocess.run(
-        ["git", "-c", "core.quotepath=off", *args],
-        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
-    )
+    """Run git and return its output. The bytes are decoded without newline
+    translation: a carriage return inside a changed line is part of that line,
+    and turning it into a line break would throw off the hunk line counts."""
+    res = subprocess.run(["git", "-c", "core.quotepath=off", *args], cwd=cwd, capture_output=True, timeout=15)
     if res.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed: {res.stderr.strip()}")
-    return res.stdout
+        raise RuntimeError(f"git {' '.join(args)} failed: {res.stderr.decode('utf-8', 'replace').strip()}")
+    return res.stdout.decode("utf-8", "replace")
 
 
 def git_toplevel(cwd: Path) -> Path | None:
     try:
         return Path(_git(["rev-parse", "--show-toplevel"], cwd).strip())
-    except (RuntimeError, OSError):
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
         return None
 
 
 _HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_ESCAPES = {"a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r", '"': '"', "\\": "\\"}
+
+
+def _unquote(path: str) -> str:
+    """A path as git prints it: C-quoted when it holds a quote, a backslash or
+    a control character, with octal escapes for the bytes of other characters."""
+    if not (len(path) >= 2 and path[0] == '"' and path[-1] == '"'):
+        return path
+    raw = bytearray()
+    body, i = path[1:-1], 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            if nxt in "01234567" and re.match(r"[0-7]{3}", body[i + 1:i + 4]):
+                raw.append(int(body[i + 1:i + 4], 8))
+                i += 4
+                continue
+            raw += _ESCAPES.get(nxt, nxt).encode()
+            i += 2
+            continue
+        raw += ch.encode()
+        i += 1
+    return raw.decode("utf-8", "replace")
 
 
 def added_lines_by_file(diff: str) -> dict[str, list[tuple[int, str]]]:
@@ -388,7 +421,7 @@ def added_lines_by_file(diff: str) -> dict[str, list[tuple[int, str]]]:
                 old_left -= 1
             continue
         if line.startswith("+++ "):
-            target = line[4:].rstrip("\t")
+            target = _unquote(line[4:].rstrip("\t"))
             current = None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
             if current is not None:
                 files.setdefault(current, [])
@@ -399,29 +432,273 @@ def added_lines_by_file(diff: str) -> dict[str, list[tuple[int, str]]]:
     return files
 
 
-DIFF_FLAGS = ["--no-color", "--no-ext-diff", "-U0", "--diff-filter=ACMR"]
+# Prefixes are fixed so that diff.noprefix and diff.mnemonicPrefix cannot change
+# how paths read, and renames are a deletion plus an addition, so a file moved
+# out of an allowed path is checked as the new file it is.
+DIFF_FLAGS = [
+    "--no-color", "--no-ext-diff", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "-U0", "--diff-filter=ACM",
+]
+
+# How much of a file is read for its first line when the whole of it is not.
+HEAD_BYTES = 65536
+# Total bytes read whole for one check, old and new versions together, as a
+# multiple of max_bytes. Past it, a file is judged from its added lines.
+READ_BUDGET_FILES = 8
+# Bytes requested from git in one `cat-file --batch` call.
+BATCH_BYTES = 16 * 1024 * 1024
+
+_LFS_POINTER = re.compile(rb"\Aversion https://git-lfs\.github\.com/spec/v1\n(?:[a-z0-9.-]+ [^\n]*\n)*?oid sha256:([0-9a-f]{64})\n")
 
 
-def _scan_diff(diff: str, top: Path, cfg: Config) -> list[FileResult]:
-    results = []
-    for path, added in added_lines_by_file(diff).items():
-        if not added:
+@dataclass
+class _Budget:
+    remaining: int
+
+    def take(self, size: int) -> bool:
+        if size > self.remaining:
+            return False
+        self.remaining -= size
+        return True
+
+
+@dataclass
+class _Content:
+    """What was read of one version of a file."""
+
+    data: bytes
+    whole: bool
+
+
+def _read_objects(top: Path, names: list[str], max_bytes: int, budget: _Budget) -> dict[str, _Content]:
+    """Blobs named like `:path` or `HEAD:path`, read whole when they fit
+    max_bytes and the budget, otherwise only their first HEAD_BYTES. A name
+    git cannot resolve to a blob (a deleted file, a submodule, no HEAD yet) is
+    left out."""
+    names = [n for n in names if "\n" not in n and "\r" not in n]
+    if not names:
+        return {}
+    checked = subprocess.run(
+        ["git", "cat-file", "--batch-check"], cwd=top, capture_output=True, timeout=15,
+        input="".join(f"{n}\n" for n in names).encode(),
+    )
+    if checked.returncode != 0:
+        return {}
+    sizes: dict[str, int] = {}
+    for name, line in zip(names, checked.stdout.split(b"\n"), strict=False):
+        fields = line.split()
+        if len(fields) == 3 and fields[1] == b"blob" and fields[2].isdigit():
+            sizes[name] = int(fields[2])
+    whole = [n for n in sizes if sizes[n] <= max_bytes and budget.take(sizes[n])]
+    out = {n: _Content(_blob_head(top, n), False) for n in sizes if n not in set(whole)}
+    group: list[str] = []
+    group_bytes = 0
+    for name in whole + [""]:
+        if name and group_bytes + sizes[name] <= BATCH_BYTES:
+            group.append(name)
+            group_bytes += sizes[name]
             continue
-        full = top / path
-        if cfg.is_allowed_path(full):
-            results.append(FileResult(cfg.relpath(full), Verdict(ALLOW), "allowlisted path", skipped=True))
+        out.update(_batch(top, group))
+        group, group_bytes = ([name], sizes[name]) if name else ([], 0)
+    return out
+
+
+def _batch(top: Path, names: list[str]) -> dict[str, _Content]:
+    if not names:
+        return {}
+    res = subprocess.run(
+        ["git", "cat-file", "--batch"], cwd=top, capture_output=True, timeout=60,
+        input="".join(f"{n}\n" for n in names).encode(),
+    )
+    if res.returncode != 0:
+        return {}
+    out: dict[str, _Content] = {}
+    data, pos = res.stdout, 0
+    for name in names:
+        header_end = data.find(b"\n", pos)
+        if header_end < 0:
+            break
+        header = data[pos:header_end].split()
+        pos = header_end + 1
+        if len(header) != 3 or not header[2].isdigit():
             continue
-        text = "\n".join(t for _, t in added)
-        results.append(FileResult(cfg.relpath(full), scan_text(text, cfg, [n for n, _ in added])))
+        size = int(header[2])
+        out[name] = _Content(data[pos:pos + size], True)
+        pos += size + 1
+    return out
+
+
+def _blob_head(top: Path, name: str) -> bytes:
+    """The first HEAD_BYTES of a blob, without reading the rest."""
+    with subprocess.Popen(["git", "cat-file", "blob", name], cwd=top, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as proc:
+        assert proc.stdout is not None
+        head = proc.stdout.read(HEAD_BYTES)
+        proc.kill()
+    return head
+
+
+def _worktree_content(top: Path, path: str, max_bytes: int, budget: _Budget) -> _Content | None:
+    """A file as `git commit -a` would stage it. A symbolic link is its target
+    path, as git stores it, and is never followed; anything that is not a
+    regular file or a link (a FIFO, a device) is not read at all."""
+    full = top / path
+    try:
+        st = os.lstat(full)
+        if stat.S_ISLNK(st.st_mode):
+            return _Content(os.fsencode(os.readlink(full)), True)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if st.st_size <= max_bytes and budget.take(st.st_size):
+            with full.open("rb") as fh:
+                data = fh.read(max_bytes + 1)
+            return _Content(data, len(data) <= max_bytes)
+        with full.open("rb") as fh:
+            return _Content(fh.read(HEAD_BYTES), False)
+    except OSError:
+        return None
+
+
+def _text_of(content: _Content | None) -> str | None:
+    if content is None or not content.whole:
+        return None
+    text = decode_bytes(content.data)
+    return None if text is None else text.removeprefix("﻿")
+
+
+def _first_line(content: _Content | None) -> str | None:
+    if content is None:
+        return None
+    decoded = decode_bytes(content.data[:HEAD_BYTES])
+    return None if decoded is None else decoded.removeprefix("﻿").split("\n", 1)[0].rstrip("\r")
+
+
+def _introduced(new: list[Finding], old: list[Finding], new_text: str, old_text: str) -> set[int]:
+    """Findings the new version has that the old one did not: the ids of those
+    in `new` left over once each is matched to an old finding of the same
+    category and value. A finding can be new on a line the change never
+    touched: rows that a new header makes into a patient table, a resource
+    that new evidence makes into a FHIR Patient."""
+    remaining = Counter((f.category, old_text[f.start:f.end]) for f in old)
+    fresh = set()
+    for f in new:
+        key = (f.category, new_text[f.start:f.end])
+        if remaining[key]:
+            remaining[key] -= 1
+        else:
+            fresh.add(id(f))
+    return fresh
+
+
+def _member_of(ids: set[int]) -> Callable[[Finding], bool]:
+    return lambda f: id(f) in ids
+
+
+def _from_added_lines(added: list[tuple[int, str]], head: str | None, cfg: Config) -> Verdict:
+    """A change judged from its added lines alone, read under the file's first
+    line, which is where a table's header is. For a file too large to read
+    whole within max_bytes and the read budget, or one that is not text."""
+    rows = ([(1, head)] if head is not None and added[0][0] != 1 else []) + added
+    text = "\n".join(t for _, t in rows)
+    findings = _findings(text, cfg, [n for n, _ in rows])
+    first_added = len(rows) - len(added)
+    starts = _line_index(text)
+    added_from = starts[first_added] if first_added < len(starts) else len(text)
+    return evaluate(findings, cfg.record_window, changed=lambda f: f.end > added_from)
+
+
+def _lfs_object(top: Path, data: bytes) -> Path | None:
+    m = _LFS_POINTER.match(data)
+    if m is None:
+        return None
+    oid = m.group(1).decode()
+    try:
+        common = Path(_git(["rev-parse", "--git-common-dir"], top).strip())
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+        return Path("/nonexistent")
+    common = common if common.is_absolute() else top / common
+    return common / "lfs" / "objects" / oid[:2] / oid[2:4] / oid
+
+
+def _scan_lfs(cfg: Config, top: Path, path: str, data: bytes) -> FileResult | None:
+    """A file stored with git-lfs: git holds a pointer, and the content that
+    leaves with a push is the object it names. That object is scanned whole."""
+    obj = _lfs_object(top, data)
+    if obj is None:
+        return None
+    rel = cfg.relpath(top / path)
+    if obj.is_file():
+        result = scan_file(obj, cfg)
+        result.path, result.note = rel, "git-lfs object"
+        return result
+    note = "git-lfs object not in this clone, not inspected"
+    if cfg.opaque == "block":
+        return FileResult(rel, Verdict(BLOCK, [], [f"{note} (opaque = block)"]), "opaque")
+    return FileResult(rel, Verdict(ALLOW), note, skipped=True)
+
+
+def _changed_paths(top: Path, staged: bool) -> tuple[list[str], list[str]]:
+    """(text, binary) paths added, copied or modified, renames counted as new
+    files. Text paths include those with deletions only: removing the blank
+    line between a header and its rows makes a table out of both."""
+    args = ["diff", *(["--cached"] if staged else []), "--numstat", "-z", "--no-renames", "--diff-filter=ACM"]
+    text: list[str] = []
+    binary: list[str] = []
+    for record in _git(args, top).split("\0"):
+        fields = record.split("\t", 2)
+        if len(fields) == 3 and fields[2]:
+            (binary if fields[0] == "-" else text).append(fields[2])
+    return text, binary
+
+
+def _scan_changes(cfg: Config, top: Path, staged: bool) -> list[FileResult]:
+    """Every text file the change touches, judged by the findings it
+    introduces: the new version is scanned whole, so an added line is read
+    with the header or name that gives it meaning, and compared with the old
+    one, so PHI the file already held is not reported again."""
+    text_paths, _binary = _changed_paths(top, staged)
+    budget = _Budget(READ_BUDGET_FILES * cfg.max_bytes)
+    results: list[FileResult] = []
+    todo = []
+    for path in text_paths:
+        if cfg.is_allowed_path(top / path):
+            results.append(FileResult(cfg.relpath(top / path), Verdict(ALLOW), "allowlisted path", skipped=True))
+        else:
+            todo.append(path)
+    if not todo:
+        return results
+    if staged:
+        new_side = _read_objects(top, [f":{p}" for p in todo], cfg.max_bytes, budget)
+        new = {p: new_side.get(f":{p}") for p in todo}
+    else:
+        new = {p: _worktree_content(top, p, cfg.max_bytes, budget) for p in todo}
+    base = "HEAD:" if staged else ":"
+    old_side = _read_objects(top, [f"{base}{p}" for p in todo], cfg.max_bytes, budget)
+    added = added_lines_by_file(_git(["diff", *(["--cached"] if staged else []), *DIFF_FLAGS], top))
+    for path in todo:
+        rel = cfg.relpath(top / path)
+        content = new.get(path)
+        if content is not None:
+            lfs = _scan_lfs(cfg, top, path, content.data)
+            if lfs is not None:
+                results.append(lfs)
+                continue
+        new_text = _text_of(content)
+        old_content = old_side.get(f"{base}{path}")
+        old_text = _text_of(old_content) if old_content is not None else ""
+        if new_text is not None and old_text is not None:
+            findings = _findings(new_text, cfg)
+            fresh = _introduced(findings, _findings(old_text, cfg), new_text, old_text)
+            verdict = evaluate(findings, cfg.record_window, changed=_member_of(fresh))
+            results.append(FileResult(rel, verdict))
+        elif added.get(path):
+            results.append(FileResult(rel, _from_added_lines(added[path], _first_line(content), cfg), "added lines"))
     return results
 
 
 def _binary_paths(top: Path, staged: bool) -> list[str]:
     """Changed files git treats as binary. They have no added lines in a diff,
     and that is every spreadsheet, archive, database and UTF-16 export."""
-    args = ["diff", *(["--cached"] if staged else []), "--numstat", "-z", "--no-renames", "--diff-filter=ACM"]
-    fields = (record.split("\t", 2) for record in _git(args, top).split("\0"))
-    return [f[2] for f in fields if len(f) == 3 and f[0] == "-"]
+    return _changed_paths(top, staged)[1]
 
 
 def _scan_staged_blob(cfg: Config, top: Path, path: str) -> FileResult:
@@ -434,7 +711,7 @@ def _scan_staged_blob(cfg: Config, top: Path, path: str) -> FileResult:
     if size > cfg.max_bytes:
         reason = f"staged file is {size} bytes, over max_bytes={cfg.max_bytes}; not scanned"
         return FileResult(rel, Verdict(BLOCK, [], [reason]), "oversize")
-    blob = subprocess.run(["git", "show", f":{path}"], cwd=top, capture_output=True, timeout=15)
+    blob = subprocess.run(["git", "cat-file", "blob", f":{path}"], cwd=top, capture_output=True, timeout=15)
     if blob.returncode != 0:
         return FileResult(rel, Verdict(BLOCK, [], ["cannot read staged file; not inspected"]), "unreadable")
     with tempfile.TemporaryDirectory(prefix="phi-gate-") as tmp:
@@ -446,12 +723,12 @@ def _scan_staged_blob(cfg: Config, top: Path, path: str) -> FileResult:
 
 
 def _scan_staged(cfg: Config, top: Path) -> list[FileResult]:
-    results = _scan_diff(_git(["diff", "--cached", *DIFF_FLAGS], top), top, cfg)
+    results = _scan_changes(cfg, top, staged=True)
     return results + [_scan_staged_blob(cfg, top, p) for p in _binary_paths(top, staged=True)]
 
 
 def _scan_unstaged(cfg: Config, top: Path) -> list[FileResult]:
-    results = _scan_diff(_git(["diff", *DIFF_FLAGS], top), top, cfg)
+    results = _scan_changes(cfg, top, staged=False)
     return results + [scan_file(top / p, cfg) for p in _binary_paths(top, staged=False)]
 
 

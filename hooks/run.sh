@@ -1,22 +1,103 @@
 #!/usr/bin/env bash
-# phi-gate hook wrapper. Fail-closed: if the checker cannot run for any reason
-# (missing python3, crash, bad install), the action is blocked (exit 2).
-# Set PHI_GATE_FAIL_OPEN=1 to let actions through when the checker is broken.
+# phi-gate hook wrapper. Fail-closed: an action is allowed only when the
+# checker exits 0 AND writes the allow token to file descriptor 3, which
+# phi_gate.cli.hook_entry does only after deciding to allow. A missing
+# interpreter, a crash, any other program that exits 0, or a checker that
+# runs longer than LIMIT seconds blocks the action (exit 2). LIMIT stays
+# below the 30-second hook timeout in hooks.json, at which Claude Code would
+# let the action through.
+#
+# Without a managed policy, PHI_GATE_FAIL_OPEN=1 lets actions through when the
+# checker is broken and PHI_GATE_PYTHON chooses the interpreter. When a
+# managed policy is installed, those variables and PHI_GATE_CONFIG and
+# PHI_GATE_MANAGED_CONFIG are ignored unless the policy sets
+# allow_env_overrides = true.
 EVENT="${1:-}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 2
+TOKEN="PHI-GATE-ALLOW-1"
+LIMIT=25
+
+POLICY=""
+for candidate in "/etc/phi-gate/policy.toml" "/Library/Application Support/phi-gate/policy.toml"; do
+  if [ -e "$candidate" ]; then
+    POLICY="$candidate"
+    break
+  fi
+done
+if [ -n "$POLICY" ] && ! grep -Eq '^[[:space:]]*allow_env_overrides[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$' "$POLICY" 2>/dev/null; then
+  unset PHI_GATE_FAIL_OPEN PHI_GATE_PYTHON PHI_GATE_CONFIG PHI_GATE_MANAGED_CONFIG
+fi
+
 PY="${PHI_GATE_PYTHON:-python3}"
 
-# -I: isolated mode, so a phi_gate/ folder in the project cannot shadow ours.
-"$PY" -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from phi_gate.hooks import main; sys.exit(main(sys.argv[2]))' \
-  "$ROOT/src" "$EVENT"
-rc=$?
+# Runs a command, stopping it and everything it started after LIMIT seconds,
+# and exits 124 when it does. Uses timeout(1) or gtimeout(1) when present, then
+# perl (shipped with macOS), and a shell watchdog as a last resort.
+with_deadline() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$LIMIT" "$@"
+    return $?
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$LIMIT" "$@"
+    return $?
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    # The checker runs in its own process group, so a timeout also stops any
+    # process it started that still holds the allow-token descriptor.
+    perl -e '
+      my $limit = shift @ARGV;
+      my $pid = fork;
+      exit 2 unless defined $pid;
+      if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
+      $SIG{ALRM} = sub { kill "TERM", -$pid; sleep 1; kill "KILL", -$pid; exit 124 };
+      alarm $limit;
+      waitpid($pid, 0);
+      exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+    ' "$LIMIT" "$@"
+    return $?
+  fi
+  # Job control gives the checker its own process group, so the watchdog
+  # stops it together with anything it started.
+  set -m
+  exec 5<&0
+  "$@" <&5 &
+  local pid=$! watcher rc
+  set +m
+  ( sleep "$LIMIT"; kill -TERM -- "-$pid" 2>/dev/null; sleep 2; kill -KILL -- "-$pid" 2>/dev/null ) \
+    </dev/null >/dev/null 2>&1 3>&- 5<&- &
+  watcher=$!
+  wait "$pid"
+  rc=$?
+  kill "$watcher" 2>/dev/null
+  return "$rc"
+}
 
-if [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; then
-  exit "$rc"
-fi
-if [ "${PHI_GATE_FAIL_OPEN:-}" = "1" ]; then
-  echo "phi-gate: checker failed (exit $rc); PHI_GATE_FAIL_OPEN=1 so allowing." >&2
+# -I: isolated mode, so a phi_gate/ folder in the project cannot shadow ours.
+# File descriptor 3 carries the allow token into $token; the checker's own
+# stdout (JSON for Claude Code) passes through on descriptor 4.
+exec 4>&1
+token="$(with_deadline "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from phi_gate.cli import hook_entry; sys.exit(hook_entry(sys.argv[2]))' \
+  "$ROOT/src" "$EVENT" 3>&1 1>&4 4>&-)"
+rc=$?
+exec 4>&-
+
+if [ "$rc" -eq 0 ] && [ "$token" = "$TOKEN" ]; then
   exit 0
 fi
-echo "phi-gate: checker failed to run (exit $rc), blocking by default (fail-closed). Check that '$PY' is Python 3.11+." >&2
+if [ "$rc" -eq 2 ]; then
+  exit 2
+fi
+if [ "$rc" -eq 0 ]; then
+  reason="'$PY' exited 0 without confirming a decision"
+elif [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+  reason="the check did not finish within ${LIMIT}s"
+else
+  reason="checker failed to run (exit $rc)"
+fi
+if [ "${PHI_GATE_FAIL_OPEN:-}" = "1" ]; then
+  echo "phi-gate: $reason; PHI_GATE_FAIL_OPEN=1 so allowing." >&2
+  exit 0
+fi
+echo "phi-gate: $reason, blocking by default (fail-closed). Check that '$PY' is Python 3.11+." >&2
 exit 2

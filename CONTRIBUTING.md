@@ -21,7 +21,11 @@ python -m unittest discover -s tests     # unit, hook, git, property and stress 
 ./demo/run-demo.sh                       # exits 1 if any decision changes
 ruff check src tests bench
 mypy
+shellcheck hooks/run.sh bin/phi-gate demo/run-demo.sh
 ```
+
+A change that closes a bypass comes with a test that fails without it. Say in the
+pull request how you checked that.
 
 phi-gate itself has no runtime dependencies, and that should stay true: it runs
 inside a hook on machines where installing packages may not be an option. Test
@@ -38,7 +42,7 @@ change needs both sides of the evidence:
 
 ## Versioning
 
-phi-gate follows [semantic versioning](https://semver.org). Configuration keys,
-exit codes and the audit event format are the public interface. A new detector
+phi-gate follows [semantic versioning](https://semver.org). Configuration keys and
+their meaning, exit codes and the audit event format are the public interface. A new detector
 can block something that passed before, so detectors may change in a minor
 release; the changelog says so.

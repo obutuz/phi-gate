@@ -6,3 +6,9 @@ updates:
       interval: weekly
     commit-message:
       prefix: ci
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

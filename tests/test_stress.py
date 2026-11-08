@@ -37,7 +37,7 @@ class ConcurrentAudit(unittest.TestCase):
 
 class ConcurrentHooks(HookTestCase):
     def test_hook_processes_racing_keep_the_chain_intact(self):
-        payload = f'{{"cwd": "{self.dir}", "tool_name": "Bash", "tool_input": {{"command": "echo SSN 123-45-6789"}}}}'
+        payload = f'{{"cwd": "{self.dir}", "tool_name": "Bash", "tool_input": {{"command": "echo SSN 234-56-7891"}}}}'
         env = {k: v for k, v in self.env.items()}
         running = [
             subprocess.Popen(

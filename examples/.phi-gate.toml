@@ -1,20 +1,26 @@
-# .phi-gate.toml: put this at your project root. Humans edit it; the Claude
+# .phi-gate.toml: put this at your project root. People edit it; the Claude
 # Code hooks refuse agent edits to it, so an agent cannot loosen its own rules.
+# Every key is optional. docs/CONFIGURATION.md describes each one.
 [phi-gate]
 
 # "block" (default): deny the action. "warn": allow and show a message.
 # "audit": allow silently, log only. Start with "audit" to measure noise.
 mode = "block"
 
-# Paths (relative to this file, glob syntax; * also crosses folders) that hold
-# synthetic data and may be read and written freely.
+# Paths that hold synthetic data and may be read and written freely. Patterns
+# are relative to the project root and use gitignore-style globs: `*` and `?`
+# stay within one folder, `**` crosses folders, a pattern without a slash
+# matches a name at any depth, and a leading `/` anchors it to the root.
+# Paths outside the project never match.
 allow_paths = [
-  "tests/fixtures/*",
-  "seed/synthetic/*",
-  "*.synthetic.*",       # any depth: * also matches /
+  "tests/fixtures/**",
+  "seed/synthetic/**",
+  "*.synthetic.*",
 ]
 
-# Exact values (full-match regexes) that are known test data.
+# Known test values, matched exactly. Prefix an entry with `re:` to use a
+# regular expression instead (at most 200 characters, no nested or repeated
+# quantifiers, no backreferences).
 allow_values = [
   "1EG4-TE5-MK73",   # CMS's published sample MBI
 ]
@@ -31,16 +37,28 @@ record_window = 400
 max_bytes = 5000000
 oversize = "block"
 
-# Where block/override events are logged. Values are never written. "" disables.
+# Formats phi-gate cannot read (PDF, images): "allow" notes them, "block"
+# refuses them.
+opaque = "allow"
+
+# Where events are logged. Matched values are never written. "" disables.
 audit_log = ".phi-gate/audit.jsonl"
+
+# How file names appear in the log: "hash" (default, a keyed hash of the
+# name plus its extension), "category" (the extension only) or "path".
+audit_targets = "hash"
+
+# An absolute path, outside the project, to a key that makes the audit chain
+# an HMAC. Usually set in the managed policy instead.
+# audit_key_file = "/etc/phi-gate/audit.key"
 
 # A prompt starting with this token is sent even if it contains PHI (logged).
 # Use only where your organisation has a BAA covering the model provider.
 # "" disables the override.
 prompt_override_token = "#phi-ok"
 
-# Scan Bash, Grep, WebFetch and MCP output after it arrives and tell Claude
-# not to propagate any PHI it contains.
+# Scan tool output after it arrives and tell Claude not to propagate any PHI
+# it contains.
 scan_tool_output = true
 
 # Show non-blocking warnings (lone emails, phone numbers) in the session.

@@ -9,11 +9,19 @@ Rules, in order:
 3. Other MEDIUM findings warn. A name next to an email is a package.json
    author field or a staff directory, not PHI by itself.
 4. LOW findings (provider NPI/DEA, public IPs) are reported, never blocking.
+
+A change to a file (a commit) is judged by what it adds, read in the context
+of the whole file: `changed` says which findings the change touched. Only
+those block or warn, so a file already holding PHI that was allowed in before
+does not block every later edit; but a record pair counts when either side is
+new, because a diagnosis added next to a patient's name makes a record even
+though the name was there already.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .detectors import CLINICAL, CONTACT, HIGH, LOW, MEDIUM, PERSON, Finding
@@ -51,26 +59,39 @@ class Verdict:
         return f"{label} {shown}{more}"
 
 
-def evaluate(findings: list[Finding], record_window: int = 400) -> Verdict:
+def evaluate(
+    findings: list[Finding],
+    record_window: int = 400,
+    changed: Callable[[Finding], bool] | None = None,
+) -> Verdict:
+    """The decision for `findings`. With `changed`, only the findings it
+    accepts are judged, and the rest are context for the record rule."""
+    new = findings if changed is None else [f for f in findings if changed(f)]
     reasons: list[str] = []
-    high = [f for f in findings if f.severity == HIGH]
+    high = [f for f in new if f.severity == HIGH]
     if high:
         reasons.append("direct identifiers: " + ", ".join(sorted({f.category for f in high})))
-        return Verdict(BLOCK, findings, reasons)
+        return Verdict(BLOCK, new, reasons)
 
     medium = sorted((f for f in findings if f.severity == MEDIUM), key=lambda f: f.start)
+    # An identifier a clinical fact can pair with. A HIGH one has blocked on its
+    # own already unless it was in the file before the change, and then it is
+    # the strongest identifier a new diagnosis could sit beside.
+    identities = [f for f in findings if f.severity == HIGH or (f.severity == MEDIUM and f.group in IDENTITY_GROUPS)]
+    fresh = {id(f) for f in new}
     for anchor in medium:
         if anchor.group != CLINICAL:
             continue
-        for other in medium:
-            if other.group not in IDENTITY_GROUPS:
+        for other in identities:
+            if id(anchor) not in fresh and id(other) not in fresh:
                 continue
             gap = max(other.start - anchor.end, anchor.start - other.end, 0)
             if gap <= record_window:
                 reasons.append(f"record-like: {anchor.category} near {other.category}")
-                return Verdict(BLOCK, findings, reasons)
+                pair = [f for f in (anchor, other) if id(f) not in fresh]
+                return Verdict(BLOCK, new + pair, reasons)
 
-    if medium:
-        reasons.append("possible identifiers: " + ", ".join(sorted({f.category for f in medium})))
-        return Verdict(WARN, findings, reasons)
-    return Verdict(ALLOW, findings, reasons)
+    if any(f.severity == MEDIUM for f in new):
+        reasons.append("possible identifiers: " + ", ".join(sorted({f.category for f in new if f.severity == MEDIUM})))
+        return Verdict(WARN, new, reasons)
+    return Verdict(ALLOW, new, reasons)

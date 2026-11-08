@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -16,6 +20,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
@@ -26,7 +31,12 @@ jobs:
           git config --global user.email ci@example.com
           git config --global user.name ci
       - name: Standard-library tests, no dependencies installed
-        run: python -m unittest discover -s tests
+        # A test still running after 10 minutes dumps every thread's stack
+        # and exits, so a hang names itself instead of holding the runner.
+        run: >-
+          python -c "import faulthandler, unittest;
+          faulthandler.dump_traceback_later(600, exit=True);
+          unittest.main(module=None, argv=['unittest', 'discover', '-s', 'tests', '-v'])"
       - name: Property tests
         run: |
           python -m pip install hypothesis
