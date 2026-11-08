@@ -107,7 +107,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           gh release upload "$TAG" dist/* --clobber
-          gh release edit "$TAG" --notes-file release-notes.md
+          gh release edit "$TAG" --title "$TAG" --notes-file release-notes.md
 
   pypi:
     needs: github-release
@@ -123,6 +123,6 @@ jobs:
           name: dist
       - name: Keep only the distributions
         run: rm -f dist/SHA256SUMS
-      - uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0  # v1.9.0
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           attestations: true
