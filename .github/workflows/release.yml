@@ -107,7 +107,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           gh release upload "$TAG" dist/* --clobber
-          gh release edit "$TAG" --notes-file release-notes.md
+          gh release edit "$TAG" --title "$TAG" --notes-file release-notes.md
 
   pypi:
     needs: github-release
