@@ -245,8 +245,12 @@ class ManagedPolicy(CliCase):
         self.use('[phi-gate]\nallow_paths = []\n', '[phi-gate]\nallow_paths = ["data/*"]\n')
         self.assertBlocked(self.pre("Read", {"file_path": str(self.dir / "data" / "patients.csv")}))
 
-    def test_a_list_the_policy_leaves_alone_stays_the_repositorys(self):
+    def test_a_list_the_policy_leaves_alone_is_still_the_policys(self):
         self.use('[phi-gate]\nmode = "block"\n', '[phi-gate]\nallow_paths = ["data/*"]\n')
+        self.assertBlocked(self.pre("Read", {"file_path": str(self.dir / "data" / "patients.csv")}))
+
+    def test_a_policy_can_let_repositories_add_to_the_lists(self):
+        self.use('[phi-gate]\nallow_repo_allowlists = true\n', '[phi-gate]\nallow_paths = ["data/*"]\n')
         self.assertAllowed(self.pre("Read", {"file_path": str(self.dir / "data" / "patients.csv")}))
 
     def test_a_repository_cannot_turn_the_override_back_on(self):
@@ -365,7 +369,7 @@ class ConfigEdgeCases(unittest.TestCase):
         from phi_gate import config
 
         with mock.patch.dict(os.environ, clear=True), mock.patch.object(config, "MANAGED_PATHS", ("/no/such/file",)):
-            self.assertIsNone(config.find_managed())
+            self.assertEqual(config.find_managed(), [])
 
 
 if __name__ == "__main__":

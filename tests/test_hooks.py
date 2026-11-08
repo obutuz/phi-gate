@@ -19,7 +19,7 @@ SSN = "123-45-6789"
 class HookTestCase(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="phi-gate-test-"))
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith("PHI_GATE_")}
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith("PHI_GATE_") and k != "CLAUDE_PROJECT_DIR"}
         subprocess.run(["git", "init", "-q"], cwd=self.dir, check=True)
         subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=self.dir, check=True)
         subprocess.run(["git", "config", "user.name", "t"], cwd=self.dir, check=True)
