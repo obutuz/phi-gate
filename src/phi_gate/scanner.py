@@ -52,11 +52,15 @@ def _locate(findings: list[Finding], text: str, line_map: list[int] | None = Non
     return out
 
 
-def scan_text(text: str, cfg: Config, line_map: list[int] | None = None) -> Verdict:
+def _findings(text: str, cfg: Config, line_map: list[int] | None = None) -> list[Finding]:
     findings = run_detectors(text, frozenset(cfg.disable))
     if cfg.allow_values:
         findings = [f for f in findings if not cfg.is_allowed_value(text[f.start:f.end])]
-    return evaluate(_locate(findings, text, line_map), cfg.record_window)
+    return _locate(findings, text, line_map)
+
+
+def scan_text(text: str, cfg: Config, line_map: list[int] | None = None) -> Verdict:
+    return evaluate(_findings(text, cfg, line_map), cfg.record_window)
 
 
 @dataclass
@@ -401,18 +405,141 @@ def added_lines_by_file(diff: str) -> dict[str, list[tuple[int, str]]]:
 
 DIFF_FLAGS = ["--no-color", "--no-ext-diff", "-U0", "--diff-filter=ACMR"]
 
+# How much of a file is read for its first line when the whole of it is not.
+HEAD_BYTES = 65536
 
-def _scan_diff(diff: str, top: Path, cfg: Config) -> list[FileResult]:
-    results = []
-    for path, added in added_lines_by_file(diff).items():
-        if not added:
+Added = list[tuple[int, str]]
+
+
+def _line_spans(text: str, lines: set[int]) -> list[tuple[int, int]]:
+    """Character ranges of the given 1-based lines, each with its newline.
+    Lines are counted as git counts them, on newlines only."""
+    spans = []
+    start = 0
+    for number, line in enumerate(text.split("\n"), 1):
+        end = start + len(line) + 1
+        if number in lines:
+            spans.append((start, end))
+        start = end
+    return spans
+
+
+def _touches(finding: Finding, spans: list[tuple[int, int]], starts: list[int]) -> bool:
+    """Whether a finding's span overlaps any of `spans` (sorted, disjoint). A
+    table's finding starts at its first data row, which may be an old one, so
+    the whole span is compared, never just the line it starts on."""
+    last = max(finding.end, finding.start + 1) - 1
+    i = bisect.bisect_right(starts, last) - 1
+    return i >= 0 and spans[i][1] > finding.start
+
+
+def _lines_up(text: str, added: Added) -> bool:
+    """Whether `text` is the content the diff describes: every added line is
+    where the diff says it is. Not so when git showed the change through a
+    filter (textconv, line-ending conversion), and then the file's own
+    lines cannot be trusted to place the change."""
+    lines = text.split("\n")
+    return all(0 < n <= len(lines) and lines[n - 1].rstrip("\r") == t.rstrip("\r") for n, t in added)
+
+
+def _scan_change(added: Added, content: str | None, head: str | None, cfg: Config) -> Verdict:
+    """A changed file, judged by what the change adds.
+
+    The detectors read the whole new file, so an added line is seen with what
+    gives it meaning: a table's header, a name a few lines up. Only findings
+    that overlap an added line decide (`evaluate`'s `changed`), so PHI the
+    file already held is not reported again. When the whole file is not to
+    hand (over max_bytes, not text, or not the lines the diff describes), the
+    added lines are read under the file's first line, which is where a
+    table's header is."""
+    if content is not None and _lines_up(content, added):
+        text, line_map, changed = content, None, {n for n, _ in added}
+    else:
+        rows = ([(1, head)] if head is not None and added[0][0] != 1 else []) + added
+        text = "\n".join(t for _, t in rows)
+        line_map = [n for n, _ in rows]
+        changed = set(range(len(rows) - len(added) + 1, len(rows) + 1))
+    spans = _line_spans(text, changed)
+    starts = [a for a, _ in spans]
+    findings = _findings(text, cfg, line_map)
+    return evaluate(findings, cfg.record_window, changed=lambda f: _touches(f, spans, starts))
+
+
+def _first_line(raw: bytes) -> str | None:
+    decoded = decode_bytes(raw[:HEAD_BYTES])
+    return None if decoded is None else decoded.split("\n", 1)[0].rstrip("\r")
+
+
+Content = tuple[bytes, bool]  # the bytes read, and whether they are the whole file
+
+
+def _staged_contents(top: Path, paths: list[str], max_bytes: int) -> dict[str, Content]:
+    """The staged bytes of each path, read in two git calls however many files
+    changed. A file over max_bytes gives only its first HEAD_BYTES. A path git
+    cannot name on one line, or cannot find, is left out."""
+    names = [p for p in paths if "\n" not in p and "\r" not in p]
+    if not names:
+        return {}
+    batch = "".join(f":{p}\n" for p in names).encode()
+    checked = subprocess.run(["git", "cat-file", "--batch-check"], cwd=top, input=batch, capture_output=True, timeout=15)
+    if checked.returncode != 0:
+        return {}
+    sizes = {}
+    for path, line in zip(names, checked.stdout.decode("utf-8", "replace").splitlines(), strict=False):
+        fields = line.split()
+        if len(fields) == 3 and fields[1] == "blob" and fields[2].isdigit():
+            sizes[path] = int(fields[2])
+    if not sizes:
+        return {}
+    wanted = list(sizes)
+    blobs = subprocess.run(
+        ["git", "cat-file", "--batch"], cwd=top, capture_output=True, timeout=60,
+        input="".join(f":{p}\n" for p in wanted).encode(),
+    )
+    if blobs.returncode != 0:
+        return {}
+    out: dict[str, Content] = {}
+    data, pos = blobs.stdout, 0
+    for path in wanted:
+        header_end = data.find(b"\n", pos)
+        if header_end < 0:
+            break
+        header = data[pos:header_end].split()
+        pos = header_end + 1
+        if len(header) != 3 or not header[2].isdigit():
             continue
+        size = int(header[2])
+        body = data[pos:pos + size]
+        pos += size + 1
+        out[path] = (body, True) if size <= max_bytes else (body[:HEAD_BYTES], False)
+    return out
+
+
+def _worktree_content(top: Path, path: str, max_bytes: int) -> Content | None:
+    try:
+        with (top / path).open("rb") as fh:
+            raw = fh.read(max_bytes + 1)
+    except OSError:
+        return None
+    return (raw, True) if len(raw) <= max_bytes else (raw[:HEAD_BYTES], False)
+
+
+def _scan_diff(diff: str, top: Path, cfg: Config, staged: bool) -> list[FileResult]:
+    changes = [(path, added) for path, added in added_lines_by_file(diff).items() if added]
+    results = []
+    todo = []
+    for path, added in changes:
         full = top / path
         if cfg.is_allowed_path(full):
             results.append(FileResult(cfg.relpath(full), Verdict(ALLOW), "allowlisted path", skipped=True))
-            continue
-        text = "\n".join(t for _, t in added)
-        results.append(FileResult(cfg.relpath(full), scan_text(text, cfg, [n for n, _ in added])))
+        else:
+            todo.append((path, added))
+    staged_raw = _staged_contents(top, [p for p, _ in todo], cfg.max_bytes) if staged else {}
+    for path, added in todo:
+        got = staged_raw.get(path) if staged else _worktree_content(top, path, cfg.max_bytes)
+        content = decode_bytes(got[0]) if got is not None and got[1] else None
+        head = _first_line(got[0]) if got is not None else None
+        results.append(FileResult(cfg.relpath(top / path), _scan_change(added, content, head, cfg)))
     return results
 
 
@@ -446,12 +573,12 @@ def _scan_staged_blob(cfg: Config, top: Path, path: str) -> FileResult:
 
 
 def _scan_staged(cfg: Config, top: Path) -> list[FileResult]:
-    results = _scan_diff(_git(["diff", "--cached", *DIFF_FLAGS], top), top, cfg)
+    results = _scan_diff(_git(["diff", "--cached", *DIFF_FLAGS], top), top, cfg, staged=True)
     return results + [_scan_staged_blob(cfg, top, p) for p in _binary_paths(top, staged=True)]
 
 
 def _scan_unstaged(cfg: Config, top: Path) -> list[FileResult]:
-    results = _scan_diff(_git(["diff", *DIFF_FLAGS], top), top, cfg)
+    results = _scan_diff(_git(["diff", *DIFF_FLAGS], top), top, cfg, staged=False)
     return results + [scan_file(top / p, cfg) for p in _binary_paths(top, staged=False)]
 
 

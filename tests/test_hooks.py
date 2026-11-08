@@ -168,6 +168,109 @@ class BashTests(HookTestCase):
         self.assertAllowed(self.pre("Bash", {"command": "git commit -m 'add app'"}))
 
 
+class GrepTests(HookTestCase):
+    """The pre-check scans the files a Grep would search before it runs. Its
+    glob only narrows that set, so a glob it cannot follow must widen it
+    (scan every file), never empty it (issue #1)."""
+
+    def grep(self, **tool_input):
+        return self.pre("Grep", {"pattern": "Doe", "path": str(self.dir / "data"), **tool_input})
+
+    def test_blocks_plain_glob_over_phi_files(self):
+        self.assertBlocked(self.grep(glob="*.csv"))
+
+    def test_blocks_brace_glob_over_phi_files(self):
+        self.assertBlocked(self.grep(glob="*.{csv,txt}"))
+        self.assertBlocked(self.grep(glob="patients.{csv}"))
+        self.assertBlocked(self.grep(glob="*.{json,{csv,tsv}}"))
+
+    def test_blocks_comma_separated_globs(self):
+        self.assertBlocked(self.grep(glob="*.txt,*.csv"))
+
+    def test_blocks_path_globs_under_the_search_root(self):
+        nested = self.dir / "data" / "2026" / "nov"
+        nested.mkdir(parents=True)
+        (self.dir / "data" / "patients.csv").rename(nested / "patients.csv")
+        self.assertBlocked(self.grep(glob="**/*.csv"))
+        self.assertBlocked(self.grep(glob="2026/**/*.csv"))
+        self.assertBlocked(self.grep(glob="2026/nov/*.csv"))
+
+    def test_a_glob_it_cannot_follow_scans_everything(self):
+        self.assertBlocked(self.grep(glob="!*.py"))
+        self.assertBlocked(self.grep(glob="*.{csv"))
+        self.assertBlocked(self.grep(glob=r"\{a\}.csv"))
+
+    def test_a_glob_that_excludes_the_phi_files_is_allowed(self):
+        (self.dir / "data" / "notes.txt").write_text("nothing here\n")
+        self.assertAllowed(self.grep(glob="*.txt"))
+        self.assertAllowed(self.grep(glob="*.{txt,md}"))
+
+
+class AppendedRowsTests(HookTestCase):
+    """Rows appended to a table whose header was committed earlier: the diff
+    holds only the rows, but the commit check reads them with the file's
+    header (issue #2)."""
+
+    HEADER = "patient_name,visit_date\n"
+    ROWS = "Grace Wanjiru,2026-03-14\nPeter Otieno,2026-04-02\n"
+
+    def setUp(self):
+        super().setUp()
+        # Only the table under test may hold PHI: `git commit -a` also checks
+        # untracked files, and the shared fixture is one.
+        shutil.rmtree(self.dir / "data")
+
+    def commit_header_only(self):
+        (self.dir / "visits.csv").write_text(self.HEADER)
+        subprocess.run(["git", "add", "visits.csv"], cwd=self.dir, check=True)
+        subprocess.run(["git", "commit", "-qm", "header"], cwd=self.dir, check=True)
+
+    def test_blocks_staged_rows_under_a_committed_header(self):
+        self.commit_header_only()
+        (self.dir / "visits.csv").write_text(self.HEADER + self.ROWS)
+        subprocess.run(["git", "add", "visits.csv"], cwd=self.dir, check=True)
+        res = self.pre("Bash", {"command": "git commit -m 'more visits'"})
+        self.assertBlocked(res)
+        self.assertIn("visits.csv", res.stderr)
+
+    def test_blocks_unstaged_rows_under_a_committed_header(self):
+        self.commit_header_only()
+        (self.dir / "visits.csv").write_text(self.HEADER + self.ROWS)
+        res = self.pre("Bash", {"command": "git commit -am 'more visits'"})
+        self.assertBlocked(res)
+        self.assertIn("visits.csv", res.stderr)
+
+    def test_blocks_rows_appended_to_a_table_that_already_had_rows(self):
+        (self.dir / "visits.csv").write_text(self.HEADER + "Grace Wanjiru,2026-03-14\n")
+        (self.dir / ".phi-gate.toml").write_text(
+            '[phi-gate]\nallow_paths = ["tests/fixtures/*", "visits.csv"]\n'
+        )
+        subprocess.run(["git", "add", "visits.csv", ".phi-gate.toml"], cwd=self.dir, check=True)
+        subprocess.run(["git", "commit", "-qm", "old rows, allowed then"], cwd=self.dir, check=True)
+        (self.dir / ".phi-gate.toml").write_text('[phi-gate]\nallow_paths = ["tests/fixtures/*"]\n')
+        subprocess.run(["git", "add", ".phi-gate.toml"], cwd=self.dir, check=True)
+        subprocess.run(["git", "commit", "-qm", "stop allowing it"], cwd=self.dir, check=True)
+        with (self.dir / "visits.csv").open("a") as fh:
+            fh.write("Peter Otieno,2026-04-02\n")
+        subprocess.run(["git", "add", "visits.csv"], cwd=self.dir, check=True)
+        self.assertBlocked(self.pre("Bash", {"command": "git commit -m 'one more'"}))
+
+    def test_an_unrelated_edit_to_a_file_with_committed_phi_is_allowed(self):
+        (self.dir / "visits.csv").write_text(self.HEADER + self.ROWS + "\n# notes\n")
+        (self.dir / ".phi-gate.toml").write_text(
+            '[phi-gate]\nallow_paths = ["tests/fixtures/*", "visits.csv"]\n'
+        )
+        subprocess.run(["git", "add", "visits.csv", ".phi-gate.toml"], cwd=self.dir, check=True)
+        subprocess.run(["git", "commit", "-qm", "old rows, allowed then"], cwd=self.dir, check=True)
+        (self.dir / ".phi-gate.toml").write_text('[phi-gate]\nallow_paths = ["tests/fixtures/*"]\n')
+        subprocess.run(["git", "add", ".phi-gate.toml"], cwd=self.dir, check=True)
+        subprocess.run(["git", "commit", "-qm", "stop allowing it"], cwd=self.dir, check=True)
+        with (self.dir / "visits.csv").open("a") as fh:
+            fh.write("# reviewed in March\n")
+        subprocess.run(["git", "add", "visits.csv"], cwd=self.dir, check=True)
+        self.assertAllowed(self.pre("Bash", {"command": "git commit -m 'note'"}))
+
+
 class OutboundTests(HookTestCase):
     def test_blocks_mcp_message_with_phi(self):
         res = self.pre("mcp__slack__post_message", {"channel": "#billing", "text": "Patient Name: Jane Doe, MRN: 00482913"})

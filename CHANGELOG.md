@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Fixes for two ways PHI could pass a check. Both were reported by Matt Abate.
+
+- Grep pre-check: a brace glob such as `*.{csv,txt}` was split into patterns
+  that matched no file, so nothing was scanned before the search ran (#1). The
+  glob is now read the way ripgrep reads it: commas between globs but not
+  inside braces, nested braces, `**` across directories, and a glob with a
+  slash matched under the search root. A glob it cannot follow (a negation, an
+  escape, unbalanced braces, over 256 alternatives) now scans every file
+  instead of none.
+- Commit check: rows appended to a table whose header was committed earlier
+  passed, because only the added lines were scanned and the header was not
+  among them (#2). A changed text file is now scanned whole, from the staged
+  content (or the working tree for `git commit -a`), and judged by the findings
+  that touch an added line. A finding is matched by its whole span, because a
+  table's finding starts at its first data row, which may be an old one. A file
+  over `max_bytes`, or one shown through a diff filter, is read as its added
+  lines under its first line.
+- Commit check: a clinical fact added within `record_window` of an identifier
+  already in the file now blocks as a record. PHI already in a file is still
+  not reported again for an unrelated edit.
+
 ## 0.1.0 (2026-11-01)
 
 First release.

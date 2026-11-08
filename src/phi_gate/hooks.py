@@ -23,7 +23,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import audit, shell
+from . import audit, globs, shell
 from .config import CONFIG_NAME, Config, ConfigError, load
 from .policy import ALLOW, BLOCK, WARN, Verdict
 from .scanner import MAX_DIR_FILES, FileResult, scan_commit, scan_file, scan_text, walk
@@ -245,11 +245,8 @@ def _pre_tool(payload: dict, cfg: Config, cwd: Path) -> tuple[str, str, Verdict 
         elif root.is_dir() and not cfg.is_allowed_path(root):
             targets = walk(root, MAX_DIR_FILES) or []  # big trees: rely on the output scan
             pattern = ti.get("glob")
-            if isinstance(pattern, str) and pattern:
-                import fnmatch
-
-                pats = [x.strip() for x in re.split(r"[,{}]", pattern) if x.strip()]
-                targets = [t for t in targets if any(fnmatch.fnmatch(t.name, x) or fnmatch.fnmatch(str(t), x) for x in pats)]
+            # Narrows what is scanned; a glob it cannot follow scans everything.
+            targets = globs.select(targets, root, pattern if isinstance(pattern, str) else None)
         else:
             targets = []
         for t in targets:
