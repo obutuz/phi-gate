@@ -1,4 +1,5 @@
 # phi-gate's own repository. Tests, the demo and the docs deliberately contain
 # synthetic but format-valid identifiers, so those paths are allowlisted.
 [phi-gate]
-allow_paths = ["tests/*", "demo/*", "README.md", "SECURITY.md", "skills/*", "examples/*"]
+allow_paths = ["tests/**", "demo/**", "README.md", "SECURITY.md", "skills/**", "examples/**"]
+allow_values = ["1EG4-TE5-MK73"]  # CMS's published sample MBI, quoted in the docs

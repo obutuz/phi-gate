@@ -22,34 +22,55 @@ loosened by one. Install it where developers and agents cannot write:
 | Linux | `/etc/phi-gate/policy.toml` |
 | macOS | `/Library/Application Support/phi-gate/policy.toml` |
 
-It takes the same keys as `.phi-gate.toml`:
+It takes the same keys as `.phi-gate.toml`, plus two that only a policy can set:
 
 ```toml
 [phi-gate]
 mode = "block"
-opaque = "block"              # refuse PDFs and images instead of allowing them
-prompt_override_token = ""    # no override at all
-allow_values = []             # repositories cannot add their own
+opaque = "block"                       # refuse PDFs and images instead of allowing them
+prompt_override_token = ""             # no override at all
+audit_key_file = "/etc/phi-gate/audit.key"   # makes the audit chain an HMAC
+audit_targets = "category"             # log extensions, not file names
+allow_repo_allowlists = false          # projects cannot add allow_paths or allow_values
+allow_env_overrides = false            # PHI_GATE_* variables are ignored
 ```
 
-| Setting | Rule |
-|---|---|
-| `mode`, `oversize`, `opaque` | The stricter of the two values wins |
-| `max_bytes` | The smaller wins |
-| `record_window` | The larger wins |
-| `protect_config`, `scan_tool_output` | `true` in the policy cannot be switched off |
-| `allow_paths`, `allow_values`, `disable` | If the policy sets a list, the repository's is ignored |
-| Anything else | The policy's value wins |
+Under a policy, a project's `.phi-gate.toml` can only make each setting
+stricter: the stricter mode wins, the smaller `max_bytes`, the larger
+`record_window`, and protections switched on stay on. A project's
+`allow_paths` and `allow_values` are ignored unless the policy sets
+`allow_repo_allowlists = true`, and its `disable` list, `audit_log` and
+`audit_key_file` are always ignored. The full rules are in the
+[configuration reference](CONFIGURATION.md#how-layers-combine).
+
+`PHI_GATE_MANAGED_CONFIG` can add a further layer for testing, but it can only
+tighten an installed policy, never replace it.
 
 An unreadable or invalid policy blocks everything until it is fixed.
 `phi-gate status` shows which policy is in force.
 
+### Audit key
+
+Create the key once per machine, readable by the developer account but outside
+any repository:
+
+```bash
+sudo install -m 0644 /dev/null /etc/phi-gate/audit.key
+head -c 32 /dev/urandom | sudo tee /etc/phi-gate/audit.key > /dev/null
+```
+
+The hooks refuse agent reads of the key. A process running as the developer
+can still read it, so treat the chain as protection against the agent, and
+forward events off the machine for protection against the developer.
+
 ## Keep the audit trail
 
 Every block, warning and override is appended to `.phi-gate/audit.jsonl`: event,
-tool, target and categories, never values. Each event carries the hash of the one
-before it, and `phi-gate audit verify` exits 1 at the first line that has been
-edited, removed or reordered.
+tool, target and categories, never values. File names are recorded as a keyed
+hash by default (see [data handling](DATA-HANDLING.md#the-audit-log)). Each event
+carries the hash, or with an audit key the HMAC, of the one before it, and
+`phi-gate audit verify` exits 1 at the first line that has been edited, removed
+or reordered.
 
 A chain cannot show that its newest lines were removed, so copy events somewhere
 the developer cannot write. Point your log forwarder at the file. The event
@@ -67,7 +88,11 @@ A `flagged` event means tool output held likely PHI, so it reached the model.
 
 ## Keep it working
 
-- Python 3.11 or newer must be on `PATH`, or set `PHI_GATE_PYTHON`. If it is
-  missing, every action is blocked. That is deliberate.
-- `PHI_GATE_FAIL_OPEN=1` lets actions through when the checker is broken. Treat
-  it as an incident, not a setting.
+- Python 3.11 or newer must be on `PATH` as `python3` (or set `PHI_GATE_PYTHON`
+  where the policy permits it). If it is missing, every action is blocked. That
+  is deliberate.
+- `PHI_GATE_FAIL_OPEN=1` lets actions through when the checker is broken. It is
+  ignored under a policy unless the policy sets `allow_env_overrides = true`.
+  Treat its use as an incident, not a setting.
+- Install the plugin from a pinned release tag, and verify the release's build
+  provenance with `gh attestation verify <file> --repo obutuz/phi-gate`.

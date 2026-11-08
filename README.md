@@ -24,16 +24,19 @@ and when it cannot run, it blocks instead of letting things through.
 | Boundary | How | What happens |
 |---|---|---|
 | Your prompts | `UserPromptSubmit` hook | A prompt with an SSN, DOB, MRN, member ID... is stopped before it reaches the model (you can deliberately override one prompt, see [Configuration](#configuration)) |
-| File reads | `PreToolUse` on `Read`, `Grep` and `Bash` | Denied for files containing PHI. Shell analysis follows `cd`, `$PWD`, globs, braces, redirections, `bash -c`, recursive `grep`/`find`/`tar`, and paths inside `python -c` or `node -e` |
+| File reads | `PreToolUse` on `Read`, `NotebookRead`, `Grep` and `Bash` | Denied for files containing PHI. Shell analysis follows `cd` and `pushd`, variables, globs, braces, redirections, `bash -c`, copies, recursive `grep`/`rg`/`find`/`tar`, and paths inside `python -c` or `node -e`. A path it cannot resolve is refused when the project holds PHI |
+| Git history | `PreToolUse` on `git show`, `log -p`, `diff`, `stash show`, `grep`, `archive`, ... | The objects the command would print are scanned first, so a deleted file cannot be read back from history |
 | Writes and edits | `PreToolUse` on `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | PHI never lands in source, fixtures, seed files or logs |
-| Commits | `PreToolUse` on `git commit`, plus an optional git pre-commit hook | Everything the commit would include is scanned, including `git add -A && git commit` and `commit -a`; `--no-verify` (any spelling) and `core.hooksPath` overrides are refused |
-| Outbound tools | `PreToolUse` on `WebFetch`, `WebSearch`, `mcp__*` | No identifiers in Slack messages, tickets, URLs or search queries |
-| Tool output | `PostToolUse` on `Bash`, `Grep`, `WebFetch`, `mcp__*` | Output with PHI is flagged; the agent is told not to propagate it and to tell you |
-| Its own rules | `PreToolUse` | The agent cannot edit `.phi-gate.toml` or the audit log, so it cannot loosen its own guardrails |
+| Commits | `PreToolUse` on `git commit` and other commit-making commands, plus an optional git pre-commit hook | Each changed file is scanned whole and the commit is judged by the PHI it introduces, so rows appended under an old table header are caught. `--no-verify` (any spelling), aliases, plumbing and `core.hooksPath` overrides are covered |
+| Outbound and other tools | `PreToolUse` on every tool: `WebFetch`, `WebSearch`, MCP tools, sub-agent prompts | No identifiers in Slack messages, tickets, URLs, search queries or delegated tasks; files a tool names are scanned too |
+| Sending data off the machine | `PreToolUse` on `Bash` | `curl`, `scp`, `nc` and similar are refused when what they send could not be checked |
+| Tool output | `PostToolUse` on every tool | Output with PHI is flagged; the agent is told not to propagate it and to tell you |
+| Its own rules | `PreToolUse` | The agent cannot edit phi-gate's configuration or audit log, Claude Code settings, `.mcp.json`, or git hooks, so it cannot loosen or switch off its own guardrails |
 
 Every block, warning and override is written to a hash-chained log at
-`.phi-gate/audit.jsonl` with the event, tool, target file and the categories found. Never
-values, never hashes of values.
+`.phi-gate/audit.jsonl` with the event, tool, target and the categories found. Never
+values, never hashes of values, and file names are recorded as keyed hashes by default.
+See [data handling](docs/DATA-HANDLING.md).
 
 ## How a Claude Code session goes
 
@@ -70,12 +73,13 @@ The plugin adds:
 
 ```bash
 pipx install git+https://github.com/obutuz/phi-gate
-phi-gate install-git-hook          # blocks commits whose added lines contain PHI
+phi-gate install-git-hook          # blocks commits that introduce PHI
 phi-gate scan .                    # exit 1 if anything would be blocked
 ```
 
-With the [pre-commit](https://pre-commit.com) framework (this scans whole staged files,
-not only the added lines):
+With the [pre-commit](https://pre-commit.com) framework (this blocks on any PHI in the
+files being committed, including PHI committed earlier, where `install-git-hook` judges
+only what the commit introduces):
 
 ```yaml
 repos:
@@ -135,7 +139,9 @@ useful for analysis:
 Pure Python standard library, no network calls, no model. Detectors are patterns with
 validation (check digits, issued ranges, labelled context), plus parsers for the
 formats healthcare data actually arrives in. Text files are read as UTF-8, UTF-16 or
-UTF-32. Containers are opened and their contents scanned: `.xlsx`, `.docx`, `.pptx`,
+UTF-32, and matched on a normalised view, so invisible characters, Unicode dashes and
+spaces, fullwidth letters and look-alike letters do not hide an identifier. Every pattern
+runs in linear time. Containers are opened and their contents scanned: `.xlsx`, `.docx`, `.pptx`,
 OpenDocument files, zip and gzip archives, and SQLite databases (header plus the first
 500 rows of each table), because exports are how patient lists actually travel. The scanner,
 `phi-gate redact` and the commit gate all read them the same way. A container that cannot
@@ -152,8 +158,9 @@ name.
 | Patient-labelled names (`patientName`, `Patient Name:`) | Labelled admission, discharge, service dates | |
 | Labelled account numbers, Luhn-valid payment cards | | |
 | X12 EDI `NM1*QC` / `NM1*IL` and `DMG*D8` segments (835/837) | | |
-| HL7 v2 `PID` segments, FHIR `Patient` resources | | |
+| HL7 v2 `PID` segments, FHIR `Patient` resources (JSON and XML) | | |
 | CSV/TSV/pipe tables with patient identifier columns and data rows | | |
+| Labelled values in XML elements (`<SSN>`, `<MemberId>`, `<DateOfBirth>`) | | |
 
 **Decision rules.** Any HIGH finding blocks. A clinical fact (diagnosis code, date of
 service) within 400 characters of a name, phone, email or address blocks, because
@@ -164,7 +171,9 @@ LOW findings never block.
 **Synthetic values pass by design.** These cannot belong to a real person, so they are
 never flagged and fixtures written with them just work:
 
-- SSNs in never-issued ranges: `000-`, `666-`, `9xx-` (Synthea uses `999-`)
+- SSNs in never-issued ranges: `000-`, `666-`, `9xx-` (Synthea uses `999-`), and
+  well-known dummies such as `123-45-6789`, `078-05-1120` and repeated digits
+  (`111-22-3333`)
 - phone numbers `555-0100` to `555-0199`, and toll-free numbers
 - emails at `example.com`, `example.org`, `example.net`, `.test`, `.example`, `.invalid`
 - processor test cards (`4242 4242 4242 4242`, `4111 1111 1111 1111`, ...)
@@ -176,11 +185,10 @@ tell it from a real export. Keep generator output under a folder listed in `allo
 ### Measured false-positive rate
 
 Blocking ordinary code would get the plugin uninstalled in a day, so this is measured,
-not hoped for. Across 10,992 source files (129 MB: the CPython 3.13 standard library,
-Django, NumPy, pandas and other site-packages, and npm), phi-gate blocked **2 files, or
-0.02%**: a line of `enum.py` that reads like a table header, and a 19-digit integer in
-NumPy test data that passes the payment card check. Average cost: about 11 ms per file.
-Reproduce it on your own code:
+not hoped for. Across 4,725 files (69.3 MB: the CPython 3.13 standard library with NumPy
+and other installed packages), phi-gate blocked **1 file, or 0.02%**: a 19-digit integer
+in NumPy test data that passes the payment card check. Average cost: about 7 ms per
+file. Reproduce it on your own code:
 
 ```bash
 python3 bench/false_positive_sweep.py path/to/your/repo
@@ -193,12 +201,15 @@ annotated version is [`examples/.phi-gate.toml`](examples/.phi-gate.toml).
 
 ```toml
 [phi-gate]
-mode = "block"                       # block | warn | audit
-allow_paths = ["tests/fixtures/*"]   # synthetic data lives here
-allow_values = ["1EG4-TE5-MK73"]     # known test values (full-match regex)
-disable = []                         # categories to switch off
-opaque = "allow"                     # or "block": refuse formats phi-gate cannot read
+mode = "block"                        # block | warn | audit
+allow_paths = ["tests/fixtures/**"]   # synthetic data lives here (gitignore-style globs)
+allow_values = ["1EG4-TE5-MK73"]      # known test values (exact; prefix "re:" for a regex)
+disable = []                          # categories to switch off
+opaque = "allow"                      # or "block": refuse formats phi-gate cannot read
 ```
+
+The [configuration reference](docs/CONFIGURATION.md) covers every key, how patterns
+match, and how layers combine.
 
 Start with `mode = "audit"` on an existing repo to see what would be blocked, then
 switch to `block`.
@@ -209,15 +220,19 @@ cannot use it. Use it only where your organisation has a BAA covering the model 
 or switch it off with `prompt_override_token = ""`.
 
 **Managed policy.** A security team can install a policy that every repository on a machine
-must meet and none can loosen. See the [deployment guide](docs/DEPLOYMENT.md).
+must meet and none can loosen; a `.phi-gate.toml` in a subfolder can only tighten the
+rules. See the [deployment guide](docs/DEPLOYMENT.md).
 
 ## Fail-closed by design
 
-- If the checker crashes, the interpreter is missing, or the payload is malformed or
-  empty, the hook exits 2 and the action is blocked.
+- An action is allowed only when the checker exits 0 and confirms the decision with a
+  token on a separate file descriptor. If the checker crashes, the interpreter is missing
+  or replaced, or the payload is malformed, empty or for the wrong event, the action is
+  blocked.
 - Claude Code lets an action through when a hook times out, so phi-gate never relies on
-  that timeout: detectors are linear-time (tested against adversarial inputs) and an
-  internal 15-second deadline blocks before the 30-second hook timeout set in `hooks.json`.
+  that timeout: detectors are linear-time (tested against adversarial inputs), an
+  internal 15-second deadline blocks first, and the wrapper stops the checker at 25
+  seconds, before the 30-second hook timeout set in `hooks.json`.
 - A typo in `.phi-gate.toml` (unknown key, bad value, invalid regex) blocks with a clear
   error instead of being ignored. An ignored typo in an allowlist is a silent hole.
 - Files over `max_bytes` are blocked unscanned unless you choose `oversize = "scan_head"`.
@@ -226,7 +241,7 @@ must meet and none can loosen. See the [deployment guide](docs/DEPLOYMENT.md).
 - Findings carry positions, never values, so no message, log line or audit entry can
   leak what was found.
 - `PHI_GATE_FAIL_OPEN=1` exists as an explicit, visible escape hatch for a broken
-  install. It is off by default.
+  install. It is off by default, and a managed policy switches it off entirely.
 
 ## Limitations
 
@@ -237,15 +252,16 @@ Be clear-eyed about what a pattern scanner on a developer machine can and cannot
   identifiers in PDFs, images, legacy `.doc`/`.xls`, 7z/rar, Parquet and nested
   archives (these are not inspected, or are refused with `opaque = "block"`), and non-US
   identifiers.
-- **Shell analysis is best-effort.** Bash is a programming language. phi-gate closes the
-  cheap routes (see the table above), but a path assembled at runtime, a query against a
-  database server, or a directory tree of more than 300 files is only checked after the
-  command runs, through the output scan. In the other direction it is conservative: a
-  recursive `grep` over a folder that holds a PHI file is refused until that file is moved,
-  removed or allowlisted.
+- **Shell analysis is static.** Bash is a programming language. phi-gate resolves the
+  routes in the table above and refuses what it cannot resolve when the project holds
+  PHI, but a program or script file that opens files itself (`python tool.py`, a query
+  against a database server) is only checked after it runs, through the output scan. In
+  the other direction it is conservative: a recursive `grep` over a folder that holds a
+  PHI file is refused until that file is moved, removed or allowlisted.
 - **`PostToolUse` cannot un-send.** When output arrives through a route phi-gate could
-  not see in advance (a database query, a path built at runtime), the data is already
-  in context. phi-gate then tells the agent to contain it, tells you, and logs it.
+  not see in advance (a database query, a program that opens files itself), the data is
+  already in context. phi-gate then tells the agent to contain it, tells you, and logs
+  it. It never sees data a command sent somewhere else.
 - **It protects against agent mistakes, not a determined insider.** A user can disable
   the plugin. Pair it with real controls: no production PHI on developer machines,
   least-privilege database access, and your organisation's DLP.
@@ -258,7 +274,8 @@ Be clear-eyed about what a pattern scanner on a developer machine can and cannot
   `bin/` folder.
 
 The [threat model](docs/THREAT-MODEL.md) sets out what phi-gate defends against and where
-that stops. The [deployment guide](docs/DEPLOYMENT.md) covers rolling it out across a team.
+that stops. The [deployment guide](docs/DEPLOYMENT.md) covers rolling it out across a team,
+and [data handling](docs/DATA-HANDLING.md) what phi-gate stores and where.
 
 ## Roadmap
 
@@ -291,7 +308,7 @@ skills/             hipaa-aware-dev skill and references
 commands/           /phi-gate:scan, /phi-gate:redact, /phi-gate:status
 tests/              unit, hook, git, property and stress tests (synthetic data only)
 bench/              false-positive sweep
-docs/               threat model, deployment guide, README screenshots (synthetic data only)
+docs/               threat model, deployment, configuration, data handling, screenshots (synthetic data only)
 ```
 
 ## License
