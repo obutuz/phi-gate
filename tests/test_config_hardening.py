@@ -223,6 +223,26 @@ class Deadline(WrapperCase):
         self.assertBlocked(res)
         self.assertLess(time.time() - start, 20)
 
+    def test_perl_stops_a_hung_checker_and_what_it_started(self):
+        if shutil.which("perl") is None:
+            self.skipTest("perl is not installed")
+        hang = self.fake_python("sleep 30 &\nsleep 30")
+        path = self.bare_path("perl")
+        start = time.time()
+        res = self.run_with(self.plugin(limit=2), {"prompt": "hello"}, env={"PHI_GATE_PYTHON": str(hang)}, path=path)
+        self.assertBlocked(res)
+        self.assertIn("did not finish", res.stderr)
+        self.assertLess(time.time() - start, 10)
+
+    def test_a_clean_call_does_not_wait_for_the_limit(self):
+        variants = [("perl",)] if shutil.which("perl") else []
+        for extra in variants:
+            with self.subTest(extra=extra):
+                start = time.time()
+                res = self.run_with(self.plugin(limit=20), {"prompt": "hello"}, path=self.bare_path(*extra))
+                self.assertAllowed(res)
+                self.assertLess(time.time() - start, 10)
+
     def test_the_fallback_still_allows_a_clean_prompt(self):
         res = self.run_with(self.plugin(limit=20), {"prompt": "hello"}, path=self.bare_path())
         self.assertAllowed(res)

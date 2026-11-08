@@ -30,8 +30,9 @@ fi
 
 PY="${PHI_GATE_PYTHON:-python3}"
 
-# Runs a command, killing it after LIMIT seconds. Uses timeout(1) or
-# gtimeout(1) when present, else a watchdog process (macOS without coreutils).
+# Runs a command, stopping it and everything it started after LIMIT seconds,
+# and exits 124 when it does. Uses timeout(1) or gtimeout(1) when present, then
+# perl (shipped with macOS), and a shell watchdog as a last resort.
 with_deadline() {
   if command -v timeout >/dev/null 2>&1; then
     timeout "$LIMIT" "$@"
@@ -39,6 +40,21 @@ with_deadline() {
   fi
   if command -v gtimeout >/dev/null 2>&1; then
     gtimeout "$LIMIT" "$@"
+    return $?
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    # The checker runs in its own process group, so a timeout also stops any
+    # process it started that still holds the allow-token descriptor.
+    perl -e '
+      my $limit = shift @ARGV;
+      my $pid = fork;
+      exit 2 unless defined $pid;
+      if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
+      $SIG{ALRM} = sub { kill "TERM", -$pid; sleep 1; kill "KILL", -$pid; exit 124 };
+      alarm $limit;
+      waitpid($pid, 0);
+      exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+    ' "$LIMIT" "$@"
     return $?
   fi
   # Job control gives the checker its own process group, so the watchdog
