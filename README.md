@@ -84,7 +84,7 @@ only what the commit introduces):
 ```yaml
 repos:
   - repo: https://github.com/obutuz/phi-gate
-    rev: v0.1.0
+    rev: v0.2.0
     hooks:
       - id: phi-gate
 ```

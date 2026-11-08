@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-08)
 
 This release closes the two issues reported by Matt Abate and a set of further
 routes found in a review of the whole tool. Several configuration rules change;
