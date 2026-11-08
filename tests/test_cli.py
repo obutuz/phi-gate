@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ENV = {**{k: v for k, v in os.environ.items() if not k.startswith("PHI_GATE_")}, "PYTHONPATH": str(ROOT / "src")}
+ENV = {**{k: v for k, v in os.environ.items() if not k.startswith("PHI_GATE_") and k != "CLAUDE_PROJECT_DIR"}, "PYTHONPATH": str(ROOT / "src")}
 
 
 def cli(*args, cwd, stdin=None):
@@ -44,7 +44,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("123-45-6789", res.stdout)
 
     def test_redact_map_and_restore(self):
-        mp = self.dir / "map.json"
+        mp = self.dir / "notes.map.json"
         red = cli("redact", "notes.txt", "--map", str(mp), cwd=self.dir)
         self.assertEqual(mp.stat().st_mode & 0o777, 0o600)
         back = cli("restore", "--map", str(mp), cwd=self.dir, stdin=red.stdout)
