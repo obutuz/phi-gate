@@ -58,5 +58,5 @@ Publishing the release runs `.github/workflows/release.yml`: the tests run on
 Linux and macOS, the package is built with hash-pinned tools, the
 distributions, `SHA256SUMS` and build provenance are attached to the release,
 the notes are set from the changelog, and the same files go to PyPI through
-Trusted Publishing. `.github/workflows/pypi.yml` can republish an existing
-release to PyPI by hand.
+Trusted Publishing. Running the same workflow by hand with a tag republishes
+that release's files to PyPI.
