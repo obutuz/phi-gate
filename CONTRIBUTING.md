@@ -46,3 +46,17 @@ phi-gate follows [semantic versioning](https://semver.org). Configuration keys a
 their meaning, exit codes and the audit event format are the public interface. A new detector
 can block something that passed before, so detectors may change in a minor
 release; the changelog says so.
+
+## Releasing
+
+1. Bump the version in `pyproject.toml`, `src/phi_gate/__init__.py`,
+   `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`, and add a
+   `## <version> (<date>)` section to `CHANGELOG.md`. Merge that to `main`.
+2. Publish a GitHub release whose new tag is `v<version>` on `main`.
+
+Publishing the release runs `.github/workflows/release.yml`: the tests run on
+Linux and macOS, the package is built with hash-pinned tools, the
+distributions, `SHA256SUMS` and build provenance are attached to the release,
+the notes are set from the changelog, and the same files go to PyPI through
+Trusted Publishing. `.github/workflows/pypi.yml` can republish an existing
+release to PyPI by hand.
