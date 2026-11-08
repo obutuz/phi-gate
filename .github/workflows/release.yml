@@ -5,20 +5,30 @@ name: Release
 # SHA256SUMS and build provenance are attached to the release, the notes are
 # set from CHANGELOG.md, and the same files are published to PyPI through
 # Trusted Publishing.
+#
+# Run by hand with a tag, it republishes that existing release's files to
+# PyPI without rebuilding, after checking them against SHA256SUMS and their
+# build provenance. PyPI trusts this one workflow for every upload.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish to PyPI, such as v0.2.0
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.release.tag_name }}
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   test:
+    if: github.event_name == 'release'
     strategy:
       fail-fast: true
       matrix:
@@ -43,6 +53,7 @@ jobs:
         run: ./demo/run-demo.sh
 
   build:
+    if: github.event_name == 'release'
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -84,6 +95,7 @@ jobs:
             release-notes.md
 
   github-release:
+    if: github.event_name == 'release'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -110,6 +122,7 @@ jobs:
           gh release edit "$TAG" --title "$TAG" --notes-file release-notes.md
 
   pypi:
+    if: github.event_name == 'release'
     needs: github-release
     runs-on: ubuntu-latest
     environment:
@@ -123,6 +136,39 @@ jobs:
           name: dist
       - name: Keep only the distributions
         run: rm -f dist/SHA256SUMS
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
+        with:
+          attestations: true
+
+  republish:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/phi-gate/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the release's distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
+          mkdir dist
+          gh release download "$TAG" --dir dist --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+          (cd dist && sha256sum --check --ignore-missing SHA256SUMS)
+          rm dist/SHA256SUMS
+      - name: Verify build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for f in dist/*; do
+            gh attestation verify "$f" --repo "$GH_REPO"
+          done
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           attestations: true
