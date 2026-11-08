@@ -19,8 +19,8 @@ def verdict(text):
 
 class BlocksDirectIdentifiers(unittest.TestCase):
     CASES = {
-        "ssn": "Patient SSN: 123-45-6789",
-        "ssn bare labelled": "ssn=123456789",
+        "ssn": "Patient SSN: 234-56-7891",
+        "ssn bare labelled": "ssn=234567891",
         "dob": "DOB: 04/12/1980",
         "dob json": '{"birthDate": "1980-04-12"}',
         "dob words": "date of birth: April 12, 1980",
@@ -52,10 +52,10 @@ class BlocksDirectIdentifiers(unittest.TestCase):
         "medicaid_id": "medicaid_id: AB1234567",
         "policy_number": 'policy_number = "W483920175"',
         "account_number": "account_number: 0012345678",
-        "patient_ssn": "patient_ssn: 123456789",
+        "patient_ssn": "patient_ssn: 234567891",
         # Separators people actually type
-        "ssn with spaces": "SSN: 123 45 6789",
-        "ssn with dots": "ssn=123.45.6789",
+        "ssn with spaces": "SSN: 234 56 7891",
+        "ssn with dots": "ssn=234.56.7891",
         # Line endings: real HL7 separates segments with CR
         "hl7 cr": "MSH|^~\\&|A|B\rPID|1||12345^^^MRN||DOE^JOHN^Q||19800412|M\rPV1|1|O\r",
         "hl7 crlf": "MSH|^~\\&|A|B\r\nPID|1||12345^^^MRN||DOE^JOHN^Q||19800412|M\r\nPV1|1|O\r\n",
@@ -153,25 +153,25 @@ class Validators(unittest.TestCase):
 
 class FindingsNeverCarryValues(unittest.TestCase):
     def test_no_value_in_findings_or_summary(self):
-        secret = "123-45-6789"
+        secret = "234-56-7891"
         v = verdict(f"SSN: {secret}")
         blob = repr(v.findings) + v.summary() + " ".join(v.reasons) + str([f.to_dict() for f in v.findings])
         self.assertNotIn(secret, blob)
-        self.assertNotIn("6789", blob)
+        self.assertNotIn("7891", blob)
 
     def test_line_numbers(self):
-        v = verdict("ok\nok\nSSN: 123-45-6789\n")
+        v = verdict("ok\nok\nSSN: 234-56-7891\n")
         self.assertEqual(v.findings[0].line, 3)
         self.assertEqual(v.findings[0].col, 6)
 
 
 class ConfigOptions(unittest.TestCase):
     def test_disable_category(self):
-        self.assertEqual(scan_text("SSN: 123-45-6789", Config(disable=["ssn"])).decision, "allow")
+        self.assertEqual(scan_text("SSN: 234-56-7891", Config(disable=["ssn"])).decision, "allow")
 
     def test_allow_values(self):
-        cfg = Config(allow_values=[r"123-45-6789"])
-        self.assertEqual(scan_text("SSN: 123-45-6789", cfg).decision, "allow")
+        cfg = Config(allow_values=[r"234-56-7891"])
+        self.assertEqual(scan_text("SSN: 234-56-7891", cfg).decision, "allow")
 
     def test_bad_config_raises(self):
         from phi_gate.config import ConfigError

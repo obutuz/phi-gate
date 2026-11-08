@@ -9,16 +9,16 @@ from phi_gate.redact import redact, restore  # noqa: E402
 
 
 class Redaction(unittest.TestCase):
-    TEXT = "Patient Name: Jane Doe, DOB: 04/12/1980, SSN 123-45-6789. Jane Doe's SSN 123-45-6789 again."
+    TEXT = "Patient Name: Jane Doe, DOB: 04/12/1980, SSN 234-56-7891. Jane Doe's SSN 234-56-7891 again."
 
     def test_typed_placeholders_and_consistency(self):
         out, mapping = redact(self.TEXT)
-        self.assertNotIn("123-45-6789", out)
+        self.assertNotIn("234-56-7891", out)
         self.assertNotIn("04/12/1980", out)
         self.assertIn("[SSN_1]", out)
         self.assertEqual(out.count("[SSN_1]"), 2)
         self.assertIn("DOB: [DOB_1]", out)
-        self.assertEqual(mapping["[SSN_1]"], "123-45-6789")
+        self.assertEqual(mapping["[SSN_1]"], "234-56-7891")
 
     def test_round_trip(self):
         out, mapping = redact(self.TEXT)
