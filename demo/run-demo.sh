@@ -4,6 +4,8 @@
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN="$ROOT/hooks/run.sh"
+# Claude Code puts the plugin's bin/ first on the Bash tool's PATH.
+export PATH="$ROOT/bin:$PATH"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -53,7 +55,7 @@ tool allow Read '{"file_path":"src/report.py"}' "Read src/report.py"
 tool allow Bash '{"command":"phi-gate redact data/denials-export.csv"}' "Bash: phi-gate redact data/denials-export.csv"
 
 bold "3. Writing code and fixtures"
-tool block Write '{"file_path":"src/seed.py","content":"PATIENT = {\"ssn\": \"123-45-6789\"}"}' "Write a seed file with a real-format SSN"
+tool block Write '{"file_path":"src/seed.py","content":"PATIENT = {\"ssn\": \"234-56-7891\"}"}' "Write a seed file with a real-format SSN"
 tool allow Write '{"file_path":"src/seed.py","content":"PATIENT = {\"ssn\": \"999-12-3456\", \"phone\": \"412-555-0142\"}"}' "Write a seed file with synthetic values"
 
 bold "4. Guardrail integrity"

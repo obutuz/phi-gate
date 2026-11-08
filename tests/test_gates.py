@@ -177,7 +177,7 @@ class FormatsGitCallsBinary(CliCase):
 
 class DiffParsing(CliCase):
     def test_a_line_that_looks_like_a_file_header_hides_nothing(self):
-        (self.dir / "notes.txt").write_text("++ /dev/null\nSSN: 123-45-6789\n")
+        (self.dir / "notes.txt").write_text("++ /dev/null\nSSN: 234-56-7891\n")
         self.git("add", "notes.txt")
         self.assertEqual(self.cli("scan", "--staged").returncode, 1)
 
@@ -192,7 +192,7 @@ class DiffParsing(CliCase):
         )
 
     def test_a_name_with_spaces(self):
-        (self.dir / "my notes.txt").write_text("SSN: 123-45-6789\n")
+        (self.dir / "my notes.txt").write_text("SSN: 234-56-7891\n")
         self.git("add", "my notes.txt")
         self.assertIn("my notes.txt", self.cli("scan", "--staged").stdout)
 
@@ -255,7 +255,7 @@ class ManagedPolicy(CliCase):
 
     def test_a_repository_cannot_turn_the_override_back_on(self):
         self.use('[phi-gate]\nprompt_override_token = ""\n', '[phi-gate]\nprompt_override_token = "#ok"\n')
-        self.assertBlocked(self.run_hook("UserPromptSubmit", {"prompt": "#ok SSN 123-45-6789"}))
+        self.assertBlocked(self.run_hook("UserPromptSubmit", {"prompt": "#ok SSN 234-56-7891"}))
 
     def test_limits_keep_the_stricter_value(self):
         self.use('[phi-gate]\nmax_bytes = 1000\n', '[phi-gate]\nmax_bytes = 2000\n')
@@ -332,10 +332,10 @@ class AuditLog(CliCase):
 
     def test_the_chain_carries_on_across_processes_and_never_holds_a_value(self):
         self.write_events(2)
-        self.pre("Bash", {"command": "echo SSN 123-45-6789"})
+        self.pre("Bash", {"command": "echo SSN 234-56-7891"})
         text = self.log().read_text()
         self.assertEqual(self.cli("audit", "verify").returncode, 0)
-        self.assertNotIn("123-45-6789", text)
+        self.assertNotIn("234-56-7891", text)
 
     def test_status_still_reads_the_log(self):
         self.write_events(1)

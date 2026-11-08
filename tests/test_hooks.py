@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / "hooks" / "run.sh"
 
 PHI_CSV = "patient_name,dob,mrn\nJohn Doe,1980-04-12,00482913\nAna Ruiz,1975-11-02,00519977\n"
-SSN = "123-45-6789"
+SSN = "234-56-7891"
 
 
 class HookTestCase(unittest.TestCase):

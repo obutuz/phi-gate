@@ -266,7 +266,7 @@ class WrapperPolicy(WrapperCase):
 class ManagedFloor(TempDirCase):
     LOOSE = (
         '[phi-gate]\nmode = "audit"\nopaque = "allow"\noversize = "scan_head"\nallow_paths = ["*", "**"]\n'
-        'disable = ["ssn"]\nallow_values = ["re:.*", "123-45-6789"]\nprotect_config = false\n'
+        'disable = ["ssn"]\nallow_values = ["re:.*", "234-56-7891"]\nprotect_config = false\n'
         'scan_tool_output = false\naudit_log = ""\nprompt_override_token = "#yes"\nmax_bytes = 99999999\n'
         'record_window = 1\naudit_targets = "path"\n'
     )
@@ -443,7 +443,7 @@ class ExitCodes(TempDirCase):
     def test_an_unexpected_exception_exits_2_without_its_message(self):
         os.chdir(self.dir)
         self.addCleanup(os.chdir, ROOT)
-        with mock.patch.object(cli, "cmd_explain", side_effect=TypeError("Jane Doe 123-45-6789")), \
+        with mock.patch.object(cli, "cmd_explain", side_effect=TypeError("Jane Doe 234-56-7891")), \
                 mock.patch("sys.stderr", io.StringIO()) as err:
             self.assertEqual(cli.main(["explain"]), 2)
         self.assertEqual(err.getvalue().count("\n"), 1)
@@ -517,7 +517,7 @@ class AllowValues(unittest.TestCase):
         self.assertFalse(cfg.is_allowed_value("a" * 28 + "!"))
         self.assertLess(time.time() - start, 0.5)
         self.assertTrue(cfg.is_allowed_value("1EG4-TE5-MK73"))
-        self.assertFalse(cfg.is_allowed_value("123-45-6789"))
+        self.assertFalse(cfg.is_allowed_value("234-56-7891"))
 
     def test_regex_values_refuse_catastrophic_patterns(self):
         for bad in (r"(a+)+$", r"(\d{3})+", r"(a|aa)*", r"(x)\1", "a" * 201, r"(?:(?:a)*)*"):
@@ -527,7 +527,7 @@ class AllowValues(unittest.TestCase):
     def test_safe_regex_values_work(self):
         cfg = Config(allow_values=[r"re:900-\d\d-\d{4}", r"re:555-01\d\d"])
         self.assertTrue(cfg.is_allowed_value("900-12-3456"))
-        self.assertFalse(cfg.is_allowed_value("123-45-6789"))
+        self.assertFalse(cfg.is_allowed_value("234-56-7891"))
 
     def test_invalid_regex_is_an_error(self):
         with self.assertRaises(ConfigError):

@@ -410,6 +410,8 @@ class DummySsns(BlockCase):
         "repeated digits": "111-22-3333",
         "repeated digits labelled": "SSN: 444-55-6666",
         "dummy labelled bare": "SSN: 078051120",
+        "sequential example": "123-45-6789",
+        "sequential example labelled": "SSN: 123456789",
     }
 
 

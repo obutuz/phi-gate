@@ -200,14 +200,14 @@ class WhatAChangeIntroduces(ChangeCase):
         self.assertStagedBlocked("visits.csv")
 
     def test_reformatting_a_line_of_old_phi_passes(self):
-        self.commit_allowed("notes.md", "SSN: 123-45-6789\n")
-        (self.dir / "notes.md").write_text("SSN: 123-45-6789   \n")
+        self.commit_allowed("notes.md", "SSN: 234-56-7891\n")
+        (self.dir / "notes.md").write_text("SSN: 234-56-7891   \n")
         self.git("add", "notes.md")
         self.assertStagedAllowed()
 
     def test_moving_old_phi_within_a_file_passes(self):
-        self.commit_allowed("notes.md", "intro\n\nSSN: 123-45-6789\n\noutro\n")
-        (self.dir / "notes.md").write_text("SSN: 123-45-6789\n\nintro\n\noutro\n")
+        self.commit_allowed("notes.md", "intro\n\nSSN: 234-56-7891\n\noutro\n")
+        (self.dir / "notes.md").write_text("SSN: 234-56-7891\n\nintro\n\noutro\n")
         self.git("add", "notes.md")
         self.assertStagedAllowed()
 
@@ -219,7 +219,7 @@ class HowGitIsRead(ChangeCase):
         (self.dir / "a.txt").write_text("start\n")
         self.commit()
         (self.dir / "a.txt").write_bytes(b"start\nfoo\rbar\nbaz\rqux\n")
-        (self.dir / "b.md").write_text("SSN: 123-45-6789\n")
+        (self.dir / "b.md").write_text("SSN: 234-56-7891\n")
         self.git("add", "a.txt", "b.md")
         self.assertStagedBlocked("b.md")
 

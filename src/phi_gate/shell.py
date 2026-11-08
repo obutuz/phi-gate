@@ -117,6 +117,9 @@ _PLACEHOLDER = re.compile(MARK + r"([SPD])(\d+)" + MARK)
 # commands without its arguments being scanned.
 PLUGIN_ENTRY = Path(__file__).resolve().parents[2] / "bin" / "phi-gate"
 ENTRY_NAME = "phi-gate"
+# Ignored or untracked paths `git clean -x` could delete that phi-gate
+# depends on: its state, its configuration, and the agent's settings.
+CLEAN_PROTECTED = (".phi-gate", ".phi-gate.toml", ".claude", ".mcp.json", ".pre-commit-config.yaml")
 
 _EMBEDDED_PATH = re.compile(
     r"(?<![\w~./-])(?:[\w~./-]{0,200}[\w-]\.[A-Za-z0-9]{1,8}\b|[\w~.-]{0,200}/[\w~./-]{1,300})"
@@ -1233,7 +1236,7 @@ def _analyze_git(words: list[str], base: Path, result: Analysis, literal_only: b
         result.shows_staged = True
     if sub == "clean" and any(a.startswith("-") and not a.startswith("--") and ("x" in a or "X" in a)
                               for a in sub_args):
-        result.writes.append(git_base / ".phi-gate")
+        result.writes += [git_base / name for name in CLEAN_PROTECTED]
     if sub in HISTORY_SUBS and not literal_only and _shows_content(sub, sub_args):
         unresolved = any(_unresolved(w) for w in words)
         result.git_reads.append(GitRead(sub, list(sub_args), git_base, unresolved))

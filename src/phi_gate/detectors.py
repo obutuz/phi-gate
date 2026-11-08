@@ -221,6 +221,7 @@ def dea_ok(value: str) -> bool:
 DUMMY_SSNS: Final = frozenset({
     "078051120",  # printed on a wallet insert sold in 1938, later voided
     "219099999",  # printed in a Social Security Administration pamphlet
+    "123456789",  # the sequential example used in forms, documentation and tests
 })
 
 

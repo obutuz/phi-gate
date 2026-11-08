@@ -39,9 +39,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(data["files"][0]["path"], "notes.txt")
 
     def test_redact_stdin(self):
-        res = cli("redact", "-", cwd=self.dir, stdin="SSN 123-45-6789\n")
+        res = cli("redact", "-", cwd=self.dir, stdin="SSN 234-56-7891\n")
         self.assertIn("SSN [SSN_1]", res.stdout)
-        self.assertNotIn("123-45-6789", res.stdout)
+        self.assertNotIn("234-56-7891", res.stdout)
 
     def test_redact_map_and_restore(self):
         mp = self.dir / "notes.map.json"

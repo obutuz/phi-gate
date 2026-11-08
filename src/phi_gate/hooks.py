@@ -27,8 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from . import audit, globs, shell
-from .config import CONFIG_NAME, Config, ConfigError, load
+from . import audit, config, globs, shell
+from .config import CONFIG_NAME, Config, ConfigError
 from .policy import ALLOW, BLOCK, WARN, Verdict
 from .scanner import MAX_DIR_FILES, FileResult, git_toplevel, scan_commit, scan_file, scan_text, walk
 
@@ -76,7 +76,19 @@ class Deadline(Exception):
 
 
 def _fail_open() -> bool:
-    return os.environ.get("PHI_GATE_FAIL_OPEN") == "1"
+    """The explicit escape hatch for a broken install. A managed policy
+    switches it off unless the policy itself permits environment overrides."""
+    return os.environ.get("PHI_GATE_FAIL_OPEN") == "1" and config.env_overrides_permitted()
+
+
+def _secret_block(cfg: Config, paths: list[Path], what: str) -> Decision | None:
+    """A block when any path is a secret phi-gate relies on (the audit key or
+    the salt that keys hashed audit targets)."""
+    hit = next((p for p in paths if config.is_secret(p, cfg)), None)
+    if hit is None:
+        return None
+    return Decision(BLOCK, f"phi-gate blocked {what} {cfg.relpath(hit)}: " + PROTECTED_HINT,
+                    None, cfg.relpath(hit), "secret_read")
 
 
 def _strings(obj) -> list[str]:
@@ -240,6 +252,9 @@ def _bash(command: str, cfg: Config, cwd: Path) -> Decision:
         ), v, None, "phi_in_command")
 
     files = list(a.read_files)
+    secret = _secret_block(cfg, files + list(a.read_dirs), "a shell command that reads")
+    if secret is not None:
+        return secret
     root = (git_toplevel(cwd) or cfg.root).resolve() if a.moves else cfg.root
     for move in a.moves:
         dest = move.dest.resolve() if move.dest.exists() else move.dest.parent.resolve() / move.dest.name
@@ -262,6 +277,9 @@ def _bash(command: str, cfg: Config, cwd: Path) -> Decision:
             unscanned.append(d)
             continue
         tree_files += listed
+    secret = _secret_block(cfg, tree_files, "a shell command that reads")
+    if secret is not None:
+        return secret
     for p in files + tree_files:
         r = scan_file(p, cfg)
         if r.blocking:
@@ -346,7 +364,11 @@ def _scan_input(tool: str, ti: dict, cfg: Config, cwd: Path, files: bool) -> Dec
             "Do not send identifiers to other tools, agents or services."
         ), v, None, "phi_in_input")
     if files:
-        for p in _referenced_files(ti, cwd):
+        referenced = _referenced_files(ti, cwd)
+        secret = _secret_block(cfg, referenced, f"{tool} on")
+        if secret is not None:
+            return secret
+        for p in referenced:
             r = scan_file(p, cfg)
             if r.blocking:
                 return _file_block(r, f"{tool} on")
@@ -356,6 +378,9 @@ def _scan_input(tool: str, ti: dict, cfg: Config, cwd: Path, files: bool) -> Dec
 def _read(tool: str, path, cwd: Path, cfg: Config) -> Decision:
     if not isinstance(path, str) or not path:
         raise ValueError(f"{tool} tool_input has no path")
+    secret = _secret_block(cfg, [_abs(path, cwd)], f"{tool} of")
+    if secret is not None:
+        return secret
     r = scan_file(_abs(path, cwd), cfg)
     if r.blocking:
         return Decision(BLOCK, (
@@ -433,6 +458,9 @@ def _pre_tool(payload: dict, cfg: Config, cwd: Path) -> Decision:
             targets = globs.select(found, pattern)
         else:
             targets = []
+        secret = _secret_block(cfg, [root, *targets], "Grep over")
+        if secret is not None:
+            return secret
         for t in targets:
             r = scan_file(t, cfg)
             if r.blocking:
@@ -588,9 +616,8 @@ def main(event: str | None = None) -> int:
         if not isinstance(payload, dict):
             raise ValueError("hook payload is not a JSON object")
         resolved = _event(registered, payload)
-        cwd = payload.get("cwd") or os.getcwd()
         try:
-            cfg = load(cwd)
+            cfg = config.load_for_payload(payload)
         except ConfigError as exc:
             if _fail_open():
                 return 0
