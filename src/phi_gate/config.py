@@ -401,6 +401,9 @@ DEFAULTS: dict[str, Any] = {
     if f.name in KEYS
 }
 LIST_KEYS = ("allow_paths", "allow_values", "disable")
+# What `allow_repo_allowlists` lets a repository add under a policy: exceptions
+# for named paths and values, never switching a detector off.
+REPO_ALLOWLIST_KEYS = ("allow_paths", "allow_values")
 
 
 def _read_settings(path: Path) -> dict:
@@ -441,7 +444,8 @@ def _merge(base: dict, layer: dict, *, lists_from_layer: bool = False) -> dict:
     `base`. `base` holds every key (defaults filled in). Enumerations and
     numeric limits take the stricter value, booleans the safer one. Lists,
     the audit log, the audit key and policy-only keys stay as `base` has
-    them, except that with `lists_from_layer` the layer's lists are added. A
+    them, except that with `lists_from_layer` the layer's `allow_paths` and
+    `allow_values` are added. A
     layer may switch the prompt override off but never choose a token."""
     merged = dict(base)
     for key, value in layer.items():
@@ -462,7 +466,7 @@ def _merge(base: dict, layer: dict, *, lists_from_layer: bool = False) -> dict:
         elif key == "prompt_override_token":
             if value == "":
                 merged[key] = ""
-        elif key in LIST_KEYS and lists_from_layer:
+        elif key in REPO_ALLOWLIST_KEYS and lists_from_layer:
             merged[key] = list(dict.fromkeys([*base[key], *value]))
     return merged
 

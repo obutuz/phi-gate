@@ -310,9 +310,15 @@ class ManagedFloor(TempDirCase):
               'allow_values = ["1EG4-TE5-MK73"]\nallow_repo_allowlists = false\n')
         cfg = load(self.dir)
         self.assertEqual(cfg.allow_paths, ["vendor/**", "tests/fixtures/*"])
-        self.assertEqual(cfg.disable, ["ssn"])
+        self.assertEqual(cfg.disable, [])
         self.assertTrue(cfg.is_allowed_path(self.dir / "tests" / "fixtures" / "a.csv"))
         self.assertFalse(cfg.is_allowed_path(self.outside("tests") / "fixtures" / "a.csv"))
+
+    def test_policy_opt_in_never_lets_a_repository_switch_detectors_off(self):
+        self.policy('[phi-gate]\nallow_repo_allowlists = true\n')
+        write(self.dir / ".phi-gate.toml", '[phi-gate]\ndisable = ["ssn", "dob"]\n')
+        cfg = load(self.dir)
+        self.assertEqual(cfg.disable, [])
 
     def test_policy_only_keys_are_refused_without_a_policy(self):
         write(self.dir / ".phi-gate.toml", '[phi-gate]\nallow_env_overrides = true\n')
