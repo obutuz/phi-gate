@@ -243,10 +243,12 @@ def _pre_tool(payload: dict, cfg: Config, cwd: Path) -> tuple[str, str, Verdict 
         if root.is_file():
             targets = [root]
         elif root.is_dir() and not cfg.is_allowed_path(root):
-            targets = walk(root, MAX_DIR_FILES) or []  # big trees: rely on the output scan
-            pattern = ti.get("glob")
-            # Narrows what is scanned; a glob it cannot follow scans everything.
-            targets = globs.select(targets, root, pattern if isinstance(pattern, str) else None)
+            glob = ti.get("glob")
+            pattern = glob if isinstance(glob, str) else None
+            # Large trees rely on the output scan. The glob narrows what is
+            # scanned, and one that cannot be followed scans everything.
+            found = walk(root, MAX_DIR_FILES, keep=globs.named_segments(pattern)) or []
+            targets = globs.select(found, pattern)
         else:
             targets = []
         for t in targets:

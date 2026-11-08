@@ -200,6 +200,18 @@ class GrepTests(HookTestCase):
         self.assertBlocked(self.grep(glob="*.{csv"))
         self.assertBlocked(self.grep(glob=r"\{a\}.csv"))
 
+    def test_a_directory_skipped_by_default_is_scanned_when_the_glob_names_it(self):
+        (self.dir / "data" / "build").mkdir()
+        (self.dir / "data" / "patients.csv").rename(self.dir / "data" / "build" / "patients.csv")
+        self.assertBlocked(self.grep(glob="build/*.csv"))
+        self.assertBlocked(self.grep(glob="build/**"))
+
+    def test_glob_case_does_not_matter(self):
+        self.assertBlocked(self.grep(glob="*.CSV"))
+
+    def test_a_non_string_glob_scans_everything(self):
+        self.assertBlocked(self.grep(glob=["*.txt"]))
+
     def test_a_glob_that_excludes_the_phi_files_is_allowed(self):
         (self.dir / "data" / "notes.txt").write_text("nothing here\n")
         self.assertAllowed(self.grep(glob="*.txt"))

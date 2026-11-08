@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from phi_gate.globs import MAX_ALTERNATIVES, compile_glob, select  # noqa: E402
+from phi_gate.globs import MAX_ALTERNATIVES, compile_glob, named_segments, select  # noqa: E402
 
 try:
     from hypothesis import given, settings
@@ -27,7 +27,7 @@ FILES = [
 
 
 def names(pattern):
-    return sorted(f.relative_to(ROOT).as_posix() for f in select(FILES, ROOT, pattern))
+    return sorted(f.relative_to(ROOT).as_posix() for f in select(FILES, pattern))
 
 
 class Braces(unittest.TestCase):
@@ -101,6 +101,62 @@ class WhatItCannotFollowScansEverything(unittest.TestCase):
         self.assertGreater(2 ** 9, MAX_ALTERNATIVES)
 
 
+class Generous(unittest.TestCase):
+    """Where ripgrep's reading is uncertain, select more, never less."""
+
+    def test_case_is_ignored(self):
+        files = [ROOT / "PATIENTS.CSV", ROOT / "Visits.Csv"]
+        self.assertEqual(select(files, "*.csv"), files)
+
+    def test_unicode_normalisation_is_ignored(self):
+        decomposed = ROOT / "Jose\u0301.csv"
+        self.assertEqual(select([decomposed], "Jos\u00e9.csv"), [decomposed])
+
+    def test_a_directory_glob_selects_what_is_under_it(self):
+        self.assertEqual(names("nov"), ["2026/nov/visits.csv", "2026/nov/visits.tsv"])
+        self.assertEqual(names("2026/"), ["2026/nov/visits.csv", "2026/nov/visits.tsv"])
+
+    def test_a_glob_relative_to_the_working_directory(self):
+        self.assertEqual(names("data/2026/**/*.csv"), ["2026/nov/visits.csv"])
+
+    def test_whitespace_around_globs(self):
+        self.assertEqual(names(" *.csv , *.txt "), ["2026/nov/visits.csv", "notes.txt", "patients.csv"])
+
+
+class Hostile(unittest.TestCase):
+    def test_empty_braces_scan_everything(self):
+        self.assertIsNone(compile_glob("*.{}"))
+
+    def test_too_many_double_stars_scan_everything(self):
+        self.assertIsNone(compile_glob("/".join(["**"] * 12) + "/x.csv"))
+
+    def test_an_overlong_pattern_scans_everything(self):
+        self.assertIsNone(compile_glob("a" * 5000))
+
+    def test_wildcard_runs_do_not_backtrack(self):
+        import time
+
+        deep = Path("/" + "/".join(["a" * 30] * 40) + "/" + "a" * 200 + ".txt")
+        for pattern in ("*" * 200 + "b", "**/" * 8 + "*a*a*a*a*a*a*a*a*b", "*a" * 60 + "b"):
+            started = time.monotonic()
+            select([deep], pattern)
+            self.assertLess(time.monotonic() - started, 1.0, pattern)
+
+    def test_classes_with_brackets_and_carets(self):
+        self.assertEqual(names("visits.[^t]sv"), ["2026/nov/visits.csv"])
+        self.assertIsNone(compile_glob("visits.[]"))
+
+
+class NamedSegments(unittest.TestCase):
+    def test_literal_directories_a_glob_names(self):
+        self.assertEqual(named_segments("build/**/*.{csv,txt}"), {"build"})
+        self.assertEqual(named_segments("dist/out/*.csv,node_modules/x.json"),
+                         {"dist", "out", "node_modules", "x.json"})
+        self.assertEqual(named_segments("*.csv"), set())
+        self.assertEqual(named_segments("!build"), set())
+        self.assertEqual(named_segments(None), set())
+
+
 if given is not None:
     _word = st.text(alphabet="abcxyz", min_size=1, max_size=4)
 
@@ -108,7 +164,7 @@ if given is not None:
         @settings(max_examples=300, deadline=None)
         @given(st.text(alphabet="abc*?[]{},!/.\\", max_size=24))
         def test_any_glob_selects_a_subset_or_everything(self, pattern):
-            chosen = select(FILES, ROOT, pattern)
+            chosen = select(FILES, pattern)
             self.assertTrue(set(chosen) <= set(FILES))
             if compile_glob(pattern) is None:
                 self.assertEqual(chosen, FILES)
@@ -117,8 +173,8 @@ if given is not None:
         @given(_word, st.lists(_word, min_size=1, max_size=5), _word)
         def test_braces_select_what_their_alternatives_select(self, head, choices, tail):
             files = [ROOT / f"{head}{c}{tail}.csv" for c in choices] + [ROOT / "other.csv"]
-            braced = select(files, ROOT, f"{head}{{{','.join(choices)}}}{tail}.csv")
-            spelled = select(files, ROOT, ",".join(f"{head}{c}{tail}.csv" for c in choices))
+            braced = select(files, f"{head}{{{','.join(choices)}}}{tail}.csv")
+            spelled = select(files, ",".join(f"{head}{c}{tail}.csv" for c in choices))
             self.assertEqual(braced, spelled)
             self.assertTrue(all(f in braced for f in files[:-1]))
 
